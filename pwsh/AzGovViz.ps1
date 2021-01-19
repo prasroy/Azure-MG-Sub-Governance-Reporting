@@ -1,4 +1,4 @@
-<#v4_feature_20210118_2
+<#v4_dev_20210119_0
 .SYNOPSIS  
     This script creates the following files to help better understand and audit your governance setup
     csv file
@@ -134,6 +134,7 @@ Param
 (
     #[Parameter(Mandatory = $True)][string]$ManagementGroupId,
     [string]$ManagementGroupId,
+    [switch]$CsvExport,
     [string]$CsvDelimiter = ";",
     [switch]$CsvExportUseQuotesAsNeeded,
     [string]$OutputPath,
@@ -153,6 +154,7 @@ Param
     [switch]$NoAzureConsumption,
     [int]$AzureConsumptionPeriod = 1,
     [switch]$NoAzureConsumptionReportExportToCSV,
+    [switch]$NoAADGuestUsers,
 
     #https://docs.microsoft.com/en-us/azure/azure-resource-manager/management/azure-subscription-service-limits#role-based-access-control-limits
     [int]$LimitRBACCustomRoleDefinitionsTenant = 5000,
@@ -303,7 +305,7 @@ function createBearerToken($targetEndPoint) {
 
 #API
 #region azapicall
-function AzAPICall($uri, $method, $currentTask, $body, $listenOn, $getConsumption, $getApp) {
+function AzAPICall($uri, $method, $currentTask, $body, $listenOn, $getConsumption, $getApp, $getGuests) {
     $tryCounter = 0
     $tryCounterUnexpectedError = 0
     $retryAuthorizationFailed = 5
@@ -350,7 +352,7 @@ function AzAPICall($uri, $method, $currentTask, $body, $listenOn, $getConsumptio
             if ($Script:debugAzAPICall -eq $true) { Write-Host "   DEBUG: unexpectedError: false" }
             if ($azAPIRequest.StatusCode -ne 200) {
                 if ($Script:debugAzAPICall -eq $true) { Write-Host "   DEBUG: apiStatusCode: $($azAPIRequest.StatusCode)" }
-                if ($catchResult.error.code -like "*GatewayTimeout*" -or $catchResult.error.code -like "*BadGatewayConnection*" -or $catchResult.error.code -like "*InvalidGatewayHost*" -or $catchResult.error.code -like "*ServerTimeout*" -or $catchResult.error.code -like "*ServiceUnavailable*" -or $catchResult.code -like "*ServiceUnavailable*" -or $catchResult.error.code -like "*MultipleErrorsOccurred*" -or $catchResult.error.code -like "*InternalServerError*" -or $catchResult.error.code -like "*RequestTimeout*" -or $catchResult.error.code -like "*AuthorizationFailed*" -or $catchResult.error.code -like "*ExpiredAuthenticationToken*" -or $catchResult.error.code -like "*ResponseTooLarge*" -or $catchResult.error.code -like "*InvalidAuthenticationToken*" -or ($getConsumption -and $catchResult.error.code -eq 404) -or ($getApp -and $catchResult.error.code -like "*Request_ResourceNotFound*") -or ($getApp -and $catchResult.error.code -like "*Authorization_RequestDenied*") -or $catchResult.error.message -like "*The offer MS-AZR-0110P is not supported*") {
+                if ($catchResult.error.code -like "*GatewayTimeout*" -or $catchResult.error.code -like "*BadGatewayConnection*" -or $catchResult.error.code -like "*InvalidGatewayHost*" -or $catchResult.error.code -like "*ServerTimeout*" -or $catchResult.error.code -like "*ServiceUnavailable*" -or $catchResult.code -like "*ServiceUnavailable*" -or $catchResult.error.code -like "*MultipleErrorsOccurred*" -or $catchResult.error.code -like "*InternalServerError*" -or $catchResult.error.code -like "*RequestTimeout*" -or $catchResult.error.code -like "*AuthorizationFailed*" -or $catchResult.error.code -like "*ExpiredAuthenticationToken*" -or $catchResult.error.code -like "*ResponseTooLarge*" -or $catchResult.error.code -like "*InvalidAuthenticationToken*" -or ($getConsumption -and $catchResult.error.code -eq 404) -or ($getApp -and $catchResult.error.code -like "*Request_ResourceNotFound*") -or ($getApp -and $catchResult.error.code -like "*Authorization_RequestDenied*") -or ($getGuests -and $catchResult.error.code -like "*Authorization_RequestDenied*") -or $catchResult.error.message -like "*The offer MS-AZR-0110P is not supported*") {
                     if ($catchResult.error.code -like "*ResponseTooLarge*") {
                         Write-Host "###### LIMIT #################################"
                         Write-Host "Hitting LIMIT getting Policy Compliance States!"
@@ -406,9 +408,9 @@ function AzAPICall($uri, $method, $currentTask, $body, $listenOn, $getConsumptio
                         Write-Host " $currentTask - try #$tryCounter; returned: <.code: '$($catchResult.code)'> <.error.code: '$($catchResult.error.code)'> | <.message: '$($catchResult.message)'> <.error.message: '$($catchResult.error.message)'> - (plain : $catchResult) uncertain ServicePrincipal status - skipping for now :)"
                         return "Request_ResourceNotFound"
                     }
-                    if ($getApp -and $catchResult.error.code -like "*Authorization_RequestDenied*") {
+                    if (($getApp -and $catchResult.error.code -like "*Authorization_RequestDenied*") -or ($getGuests -and $catchResult.error.code -like "*Authorization_RequestDenied*")) {
                         if ($userType -eq "Guest"){
-                            Write-Host " $currentTask - try #$tryCounter; returned: <.code: '$($catchResult.code)'> <.error.code: '$($catchResult.error.code)'> | <.message: '$($catchResult.message)'> <.error.message: '$($catchResult.error.message)'> - (plain : $catchResult) - You are a 'Guest' User in the tenant therefore not enough permissions. You have two options: [1. request membership to AAD Role 'Directory readers'.] [2. Use parameter '-NoServicePrincipalResolve'.]"
+                            Write-Host " $currentTask - try #$tryCounter; returned: <.code: '$($catchResult.code)'> <.error.code: '$($catchResult.error.code)'> | <.message: '$($catchResult.message)'> <.error.message: '$($catchResult.error.message)'> - (plain : $catchResult) - You are a 'Guest' User in the tenant therefore not enough permissions. You have the following options: [1. request membership to AAD Role 'Directory readers'.] [2. Use parameters '-NoAADGuestUsers' and '-NoServicePrincipalResolve'.] [3. Grant explicit Microsoft Graph API permission. Permissions reference Users: https://docs.microsoft.com/en-us/graph/api/user-list | Applications: https://docs.microsoft.com/en-us/graph/api/application-list]"
                             if ($AzureDevOpsWikiAsCode) {
                                 Write-Error "Error"
                             }
@@ -425,10 +427,7 @@ function AzAPICall($uri, $method, $currentTask, $body, $listenOn, $getConsumptio
                                 break script
                             }
                         }
-                        Write-Host " $currentTask - try #$tryCounter; returned: <.code: '$($catchResult.code)'> <.error.code: '$($catchResult.error.code)'> | <.message: '$($catchResult.message)'> <.error.message: '$($catchResult.error.message)'> - (plain : $catchResult) uncertain ServicePrincipal status - skipping for now :)"
-                        return "Request_ResourceNotFound"
-                    }
-                    
+                    }                    
                 }
                 else {
                     Write-Host " $currentTask - try #$tryCounter; returned: <.code: '$($catchResult.code)'> <.error.code: '$($catchResult.error.code)'> | <.message: '$($catchResult.message)'> <.error.message: '$($catchResult.error.message)'> - (plain : $catchResult) investigate that error!/exit"
@@ -2821,7 +2820,7 @@ function tableMgSubDetailsHTML($mgOrSub, $mgChild, $subscriptionId) {
         $tagsSubscriptionCount = ($htSubscriptionTags.$subscriptionId.Keys | Measure-Object).count
         if ($tagsSubscriptionCount -gt 0) {
             $tfCount = $tagsSubscriptionCount
-            $tableId = "DetailsTable_Tags_$($subscriptionId -replace '-','_')"
+            $tableId = "ScopeInsights_Tags_$($subscriptionId -replace '-','_')"
             $randomFunctionName = "func_$tableId"
             $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible">
@@ -2923,7 +2922,7 @@ extensions: [{ name: 'sort' }]
             $tagNamesUniqueCount = ($arrayTagListSubscription | Sort-Object -Property TagName -Unique | Measure-Object).Count
             $tagNamesUsedInScopes = ($arrayTagListSubscription | Sort-Object -Property Scope -Unique).scope -join "$($CsvDelimiterOpposite) "
             $tfCount = $arrayTagListSubscriptionUniqueTagsCount
-            $tableId = "DetailsTable_TagNameUsage_$($subscriptionId -replace '-','_')"
+            $tableId = "ScopeInsights_TagNameUsage_$($subscriptionId -replace '-','_')"
             $randomFunctionName = "func_$tableId"
             $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible">
@@ -2956,8 +2955,8 @@ extensions: [{ name: 'sort' }]
         </table>
         <script>
             function loadtf$randomFunctionName() { if (window.helpertfConfig4$tableId !== 1) { 
-   window.helpertfConfig4$tableId =1;
-   var tfConfig4$tableId = {
+            window.helpertfConfig4$tableId =1;
+            var tfConfig4$tableId = {
                 base_path: 'https://www.azadvertizer.net/azgovvizv4/tablefilter/', rows_counter: true,
 "@
             if ($tfCount -gt 10) {
@@ -2981,18 +2980,18 @@ extensions: [{ name: 'sort' }]
                     $spectrum = "10, 30, 50, 100, 250, 500, 750, 1000, 1500, 3000, $tfCount"
                 }
                 $htmlScopeInsights += @"
-paging: {results_per_page: ['Records: ', [$spectrum]]},state: {types: ['local_storage'], filters: true, page_number: true, page_length: true, sort: true},
+            paging: {results_per_page: ['Records: ', [$spectrum]]},state: {types: ['local_storage'], filters: true, page_number: true, page_length: true, sort: true},
 "@
             }
             $htmlScopeInsights += @"
-btn_reset: true, highlight_keywords: true, alternate_rows: true, auto_filter: { delay: 1100 }, no_results_message: true,
+            btn_reset: true, highlight_keywords: true, alternate_rows: true, auto_filter: { delay: 1100 }, no_results_message: true,
             col_0: 'multiple',
             col_types: [
                 'caseinsensitivestring',
                 'caseinsensitivestring',
                 'number'
                 ],
-extensions: [{ name: 'sort' }]
+            extensions: [{ name: 'sort' }]
             };
             var tf = new TableFilter('$tableId', tfConfig4$tableId);
             tf.init();}}
@@ -3059,7 +3058,7 @@ extensions: [{ name: 'sort' }]
                 }
 
                 $tfCount = ($arrayConsumptionData | Measure-Object).Count
-                $tableId = "DetailsTable_Consumption_$($subscriptionId -replace '-','_')"
+                $tableId = "ScopeInsights_Consumption_$($subscriptionId -replace '-','_')"
                 $randomFunctionName = "func_$tableId"
                 $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible"><i class="fa fa-credit-card" aria-hidden="true" style="color: #0078df"></i> Total cost $($arrayTotalCostSummary -join ", ") last $AzureConsumptionPeriod days ($azureConsumptionStartDate - $azureConsumptionEndDate)</button>
@@ -3184,7 +3183,7 @@ tf.init();}}
         if (-not $NoResourceProvidersDetailed) {
             if (($htResourceProvidersAll.Keys | Measure-Object).count -gt 0) {
                 $tfCount = ($arrayResourceProvidersAll | Measure-Object).Count
-                $tableId = "DetailsTable_ResourceProvider_$($subscriptionId -replace '-','_')"
+                $tableId = "ScopeInsights_ResourceProvider_$($subscriptionId -replace '-','_')"
                 $randomFunctionName = "func_$tableId"
                 $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">Resource Providers Detailed</span></button>
@@ -3272,7 +3271,7 @@ extensions: [{ name: 'sort' }]
         #ResourceLocks
         #region ScopeInsightsResourceLocks
         if ($script:htResourceLocks.($subscriptionId)) {
-            $tableId = "DetailsTable_ResourceLocks_$($subscriptionId -replace '-','_')"
+            $tableId = "ScopeInsights_ResourceLocks_$($subscriptionId -replace '-','_')"
             $randomFunctionName = "func_$tableId"
 
             $subscriptionLocksCannotDeleteCount = $script:htResourceLocks.($subscriptionId).SubscriptionLocksCannotDeleteCount
@@ -3421,7 +3420,7 @@ extensions: [{ name: 'sort' }]
                     }
 
                     $tfCount = ($arrayConsumptionData | Measure-Object).Count
-                    $tableId = "DetailsTable_Consumption_$($mgChild -replace '-','_')"
+                    $tableId = "ScopeInsights_Consumption_$($mgChild -replace '-','_')"
                     $randomFunctionName = "func_$tableId"
                     $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible"><i class="fa fa-credit-card" aria-hidden="true" style="color: #0078df"></i> Total cost $($arrayTotalCostSummary -join "$CsvDelimiterOpposite ") last $AzureConsumptionPeriod days ($azureConsumptionStartDate - $azureConsumptionEndDate)</button>
@@ -3540,7 +3539,7 @@ tf.init();}}
     if ($mgOrSub -eq "mg") {
         if ($resourcesAllChildSubscriptionLocationCount -gt 0) {
             $tfCount = ($resourcesAllChildSubscriptionsArray | measure-object).count
-            $tableId = "DetailsTable_Resources_$($mgChild -replace '-','_')"
+            $tableId = "ScopeInsights_Resources_$($mgChild -replace '-','_')"
             $randomFunctionName = "func_$tableId"
             $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $resourcesAllChildSubscriptionResourceTypeCount ResourceTypes ($resourcesAllChildSubscriptionTotal Resources) in $resourcesAllChildSubscriptionLocationCount Locations (all Subscriptions below this scope)</p></button>
@@ -3629,7 +3628,7 @@ extensions: [{ name: 'sort' }]
     if ($mgOrSub -eq "sub") {
         if ($resourcesSubscriptionResourceTypeCount -gt 0) {
             $tfCount = ($resourcesSubscription | Measure-Object).Count
-            $tableId = "DetailsTable_Resources_$($subscriptionId -replace '-','_')"
+            $tableId = "ScopeInsights_Resources_$($subscriptionId -replace '-','_')"
             $randomFunctionName = "func_$tableId"
             $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $resourcesSubscriptionResourceTypeCount ResourceTypes ($resourcesSubscriptionTotal Resources) in $resourcesSubscriptionLocationCount Locations</p></button>
@@ -3746,7 +3745,7 @@ extensions: [{ name: 'sort' }]
     
         if ($resourcesAllChildSubscriptionResourceTypeCount -gt 0) {
             $tfCount = $resourcesAllChildSubscriptionResourceTypeCount
-            $tableId = "DetailsTable_resourcesDiagnosticsCapable_$($mgchild -replace '-','_')"
+            $tableId = "ScopeInsights_resourcesDiagnosticsCapable_$($mgchild -replace '-','_')"
             $randomFunctionName = "func_$tableId"
             $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $subscriptionResourceTypesDiagnosticsCapableMetricsLogsCount/$resourcesAllChildSubscriptionResourceTypeCount ResourceTypes Diagnostics capable ($subscriptionResourceTypesDiagnosticsCapableMetricsCount Metrics, $subscriptionResourceTypesDiagnosticsCapableLogsCount Logs) (all Subscriptions below this scope)</p></button>
@@ -3873,7 +3872,7 @@ extensions: [{ name: 'sort' }]
 
         if ($resourcesSubscriptionResourceTypeCount -gt 0) {
             $tfCount = $resourcesSubscriptionResourceTypeCount
-            $tableId = "DetailsTable_resourcesDiagnosticsCapable_$($subscriptionId -replace '-','_')"
+            $tableId = "ScopeInsights_resourcesDiagnosticsCapable_$($subscriptionId -replace '-','_')"
             $randomFunctionName = "func_$tableId"
             $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $subscriptionResourceTypesDiagnosticsCapableMetricsLogsCount/$resourcesSubscriptionResourceTypeCount ResourceTypes Diagnostics capable ($subscriptionResourceTypesDiagnosticsCapableMetricsCount Metrics, $subscriptionResourceTypesDiagnosticsCapableLogsCount Logs)</p></button>
@@ -4033,7 +4032,7 @@ extensions: [{ name: 'sort' }]
 
     if (($policiesAssigned | measure-object).count -gt 0) {
         $tfCount = ($policiesAssigned | measure-object).count
-        $tableId = "DetailsTable_PolicyAssignments_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
+        $tableId = "ScopeInsights_PolicyAssignments_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
         $randomFunctionName = "func_$tableId"
         $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $policiesCount Policy Assignments ($policiesAssignedAtScope at scope, $policiesInherited inherited) (Builtin: $policiesCountBuiltin | Custom: $policiesCountCustom)</p></button>
@@ -4248,7 +4247,7 @@ extensions: [{ name: 'sort' }]
 
     if (($policySetsAssigned | measure-object).count -gt 0) {
         $tfCount = ($policiesAssigned | measure-object).count
-        $tableId = "DetailsTable_PolicySetAssignments_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
+        $tableId = "ScopeInsights_PolicySetAssignments_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
         $randomFunctionName = "func_$tableId"
         $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $policySetsCount PolicySet Assignments ($policySetsAssignedAtScope at scope, $policySetsInherited inherited) (Builtin: $policySetsCountBuiltin | Custom: $policySetsCountCustom)</p></button>
@@ -4443,7 +4442,7 @@ extensions: [{ name: 'sort' }]
 
     if ($scopePoliciesCount -gt 0) {
         $tfCount = $scopePoliciesCount
-        $tableId = "DetailsTable_ScopedPolicies_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
+        $tableId = "ScopeInsights_ScopedPolicies_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
         $randomFunctionName = "func_$tableId"
         if ($mgOrSub -eq "mg") {
             $LimitPOLICYPolicyScoped = $LimitPOLICYPolicyDefinitionsScopedManagementGroup
@@ -4575,7 +4574,7 @@ extensions: [{ name: 'sort' }]
 
     if ($scopePolicySetsCount -gt 0) {
         $tfCount = $scopePolicySetsCount
-        $tableId = "DetailsTable_ScopedPolicySets_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
+        $tableId = "ScopeInsights_ScopedPolicySets_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
         $randomFunctionName = "func_$tableId"
         if ($mgOrSub -eq "mg") {
             $LimitPOLICYPolicySetScoped = $LimitPOLICYPolicySetDefinitionsScopedManagementGroup
@@ -4695,7 +4694,7 @@ extensions: [{ name: 'sort' }]
             if ($mgOrSub -eq "sub") {
                 $tableIdentifier = $subscriptionId
             }
-            $tableId = "DetailsTable_BlueprintAssignment_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
+            $tableId = "ScopeInsights_BlueprintAssignment_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
             $randomFunctionName = "func_$tableId"
             $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $blueprintsAssignedCount Blueprints assigned</p></button>
@@ -4801,7 +4800,7 @@ extensions: [{ name: 'sort' }]
         if ($mgOrSub -eq "sub") {
             $tableIdentifier = $subscriptionId
         }
-        $tableId = "DetailsTable_BlueprintScoped_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
+        $tableId = "ScopeInsights_BlueprintScoped_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
         $randomFunctionName = "func_$tableId"
         $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $blueprintsScopedCount Blueprints scoped</p></button>
@@ -4987,7 +4986,7 @@ extensions: [{ name: 'sort' }]
 
     if (($rolesAssigned | measure-object).count -gt 0) {
         $tfCount = ($rolesAssigned | measure-object).count
-        $tableId = "DetailsTable_RoleAssignments_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
+        $tableId = "ScopeInsights_RoleAssignments_$($tableIdentifier -replace "\(","_" -replace "\)","_" -replace "-","_" -replace "\.","_")"
         $randomFunctionName = "func_$tableId"
         $htmlScopeInsights += @"
 <button onclick="loadtf$randomFunctionName()" type="button" class="collapsible"><p>$faIcon $rolesAssignedCount Role Assignments ($rolesAssignedInheritedCount inherited) (User: $rolesAssignedUser | Group: $rolesAssignedGroup | ServicePrincipal: $rolesAssignedServicePrincipal | Orphaned: $rolesAssignedUnknown) ($($roleSecurityFindingCustomRoleOwnerImg)CustomRoleOwner: $roleSecurityFindingCustomRoleOwner, $($RoleSecurityFindingOwnerAssignmentSPImg)OwnerAssignmentSP: $roleSecurityFindingOwnerAssignmentSP) (Policy related: $roleAssignmentsRelatedToPolicyCount) | Limit: ($rolesAssignedAtScopeCount/$LimitRoleAssignmentsScope)</p></button>
@@ -5004,16 +5003,18 @@ extensions: [{ name: 'sort' }]
 <th>Identity SignInName</th>
 <th>Identity ObjectId</th>
 <th>Identity Type</th>
+<th>Applicability</th>
+<th>Applies through membership <abbr title="Note: the identity might not be a direct member of the group it could also be member of a nested group"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></th>
 "@
 
-        if (-not $NoAADGroupsResolveMembers) {
+        <#if (-not $NoAADGroupsResolveMembers) {
             $htmlScopeInsights += @"
 <th>GroupMember DisplayName</th>
 <th>GroupMember SignInName</th>
 <th>GroupMember ObjectId</th>
 <th>GroupMember Type</th>
 "@
-        }
+        }#>
 
         $htmlScopeInsights += @"
 <th>Role AssignmentId</th>
@@ -5033,16 +5034,18 @@ extensions: [{ name: 'sort' }]
 <td class="breakwordall">$($roleAssignment.ObjectSignInName)</td>
 <td class="breakwordall">$($roleAssignment.ObjectId)</td>
 <td>$($roleAssignment.ObjectType)</td>
+<td>$($roleAssignment.AssignmentType)</td>
+<td>$($roleAssignment.AssignmentInheritFrom)</td>
 "@
 
-            if (-not $NoAADGroupsResolveMembers) {
+            <#if (-not $NoAADGroupsResolveMembers) {
                 @"
 <td class="breakwordall">$($roleAssignment.GrpMemberDisplayName)</td>
 <td class="breakwordall">$($roleAssignment.GrpMemberSignInName)</td>
 <td class="breakwordall">$($roleAssignment.GrpMemberId)</td>
 <td>$($roleAssignment.GrpMemberType)</td>
 "@
-            }
+            }#>
 
             @"
 <td class="breakwordall">$($roleAssignment.RoleAssignmentId)</td>
@@ -5089,12 +5092,13 @@ paging: {results_per_page: ['Records: ', [$spectrum]]},state: {types: ['local_st
 btn_reset: true, highlight_keywords: true, alternate_rows: true, auto_filter: { delay: 1100 }, no_results_message: true,
             col_2: 'select',
             col_6: 'multiple',
+            col_7: 'select',
 "@
-        if (-not $NoAADGroupsResolveMembers) {
+        <#if (-not $NoAADGroupsResolveMembers) {
             $htmlScopeInsights += @"
                 col_10: 'multiple',
 "@
-        }
+        }#>
         $htmlScopeInsights += @"
             col_types: [
                 'caseinsensitivestring',
@@ -5103,31 +5107,33 @@ btn_reset: true, highlight_keywords: true, alternate_rows: true, auto_filter: { 
                 'caseinsensitivestring',
                 'caseinsensitivestring',
                 'caseinsensitivestring',
+                'caseinsensitivestring',
+                'caseinsensitivestring',
 "@
-        if (-not $NoAADGroupsResolveMembers) {
+        <#if (-not $NoAADGroupsResolveMembers) {
             $htmlScopeInsights += @"
                 'caseinsensitivestring',
                 'caseinsensitivestring',
                 'caseinsensitivestring',
                 'caseinsensitivestring',
 "@
-        }
+        }#>
         $htmlScopeInsights += @"
                 'caseinsensitivestring',
                 'caseinsensitivestring',
                 'caseinsensitivestring'
             ],
 "@
-        if (-not $NoAADGroupsResolveMembers) {
+        <#if (-not $NoAADGroupsResolveMembers) {
             $htmlScopeInsights += @"
                 watermark: ['', 'try owner||reader', '', '', '', '', '', '', '', '', '', '', ''],
 "@
         }
-        else {
+        else {#>
             $htmlScopeInsights += @"
-                watermark: ['', 'try owner||reader', '', '', '', '', '', '', ''],
+                watermark: ['', 'try owner||reader', '', '', '', '', '', '', '', '', ''],
 "@    
-        }
+        <#}#>
         $htmlScopeInsights += @"
             
 extensions: [{ name: 'sort' }]
@@ -5280,9 +5286,9 @@ function summary() {
 
         if ($tenantCustomPoliciesCount -gt 0) {
             $tfCount = $tenantCustomPoliciesCount
-            $tableId = "SummaryTable_customPolicies"
+            $tableId = "TenantSummary_customPolicies"
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_customPolicies"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$tenantCustomPoliciesCount Custom Policies ($scopeNamingSummary)</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_customPolicies"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$tenantCustomPoliciesCount Custom Policies ($scopeNamingSummary)</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -5411,9 +5417,9 @@ extensions: [{ name: 'sort' }]
 
         if ($tenantCustomPoliciesCount -gt 0) {
             $tfCount = $tenantCustomPoliciesCount
-            $tableId = "SummaryTable_customPolicies"
+            $tableId = "TenantSummary_customPolicies"
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_customPolicies"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$tenantCustomPoliciesCount Custom Policies $scopeNamingSummary ($customPoliciesFromSuperiorMGs from superior scopes)</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_customPolicies"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$tenantCustomPoliciesCount Custom Policies $scopeNamingSummary ($customPoliciesFromSuperiorMGs from superior scopes)</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -5550,9 +5556,9 @@ extensions: [{ name: 'sort' }]
 
         if (($arrayCustomPoliciesOrphanedFinalIncludingResourceGroups | measure-object).count -gt 0) {
             $tfCount = ($arrayCustomPoliciesOrphanedFinalIncludingResourceGroups | measure-object).count
-            $tableId = "SummaryTable_customPoliciesOrphaned"
+            $tableId = "TenantSummary_customPoliciesOrphaned"
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_customPoliciesOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($arrayCustomPoliciesOrphanedFinalIncludingResourceGroups | measure-object).count) Orphaned Custom Policies ($scopeNamingSummary)</span> <abbr title="Policy is not used in a PolicySet &#13;AND &#13;Policy has no Assignments (including ResourceGroups)"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_customPoliciesOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($arrayCustomPoliciesOrphanedFinalIncludingResourceGroups | measure-object).count) Orphaned Custom Policies ($scopeNamingSummary)</span> <abbr title="Policy is not used in a PolicySet &#13;AND &#13;Policy has no Assignments (including ResourceGroups)"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -5675,9 +5681,9 @@ extensions: [{ name: 'sort' }]
 
         if (($arrayCustomPoliciesOrphanedFinalIncludingResourceGroups | measure-object).count -gt 0) {
             $tfCount = ($arrayCustomPoliciesOrphanedFinalIncludingResourceGroups | measure-object).count
-            $tableId = "SummaryTable_customPoliciesOrphaned"
+            $tableId = "TenantSummary_customPoliciesOrphaned"
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_customPoliciesOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($arrayCustomPoliciesOrphanedFinalIncludingResourceGroups | measure-object).count) Orphaned Custom Policies ($scopeNamingSummary)</span> <abbr title="Policy is not used in a PolicySet &#13;AND &#13;Policy has no Assignments (including ResourceGroups) &#13;Note: Policies from superior scopes are not evaluated"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_customPoliciesOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($arrayCustomPoliciesOrphanedFinalIncludingResourceGroups | measure-object).count) Orphaned Custom Policies ($scopeNamingSummary)</span> <abbr title="Policy is not used in a PolicySet &#13;AND &#13;Policy has no Assignments (including ResourceGroups) &#13;Note: Policies from superior scopes are not evaluated"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -5826,9 +5832,9 @@ extensions: [{ name: 'sort' }]
 
         if ($tenantCustompolicySetsCount -gt 0) {
             $tfCount = $tenantCustompolicySetsCount
-            $tableId = "SummaryTable_customPolicySets"
+            $tableId = "TenantSummary_customPolicySets"
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_customPolicySets">$faimage <span class="valignMiddle">$tenantCustompolicySetsCount Custom PolicySets ($scopeNamingSummary) (Limit: $tenantCustompolicySetsCount/$LimitPOLICYPolicySetDefinitionsScopedTenant)</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_customPolicySets">$faimage <span class="valignMiddle">$tenantCustompolicySetsCount Custom PolicySets ($scopeNamingSummary) (Limit: $tenantCustompolicySetsCount/$LimitPOLICYPolicySetDefinitionsScopedTenant)</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -5951,9 +5957,9 @@ extensions: [{ name: 'sort' }]
 
         if ($tenantCustompolicySetsCount -gt 0) {
             $tfCount = $tenantCustompolicySetsCount
-            $tableId = "SummaryTable_customPolicySets"
+            $tableId = "TenantSummary_customPolicySets"
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_customPolicySets">$faimage <span class="valignMiddle">$tenantCustomPolicySetsCount Custom PolicySets $scopeNamingSummary ($custompolicySetsFromSuperiorMGs from superior scopes) (Limit: $tenantCustompolicySetsCount/$LimitPOLICYPolicySetDefinitionsScopedTenant)</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_customPolicySets">$faimage <span class="valignMiddle">$tenantCustomPolicySetsCount Custom PolicySets $scopeNamingSummary ($custompolicySetsFromSuperiorMGs from superior scopes) (Limit: $tenantCustompolicySetsCount/$LimitPOLICYPolicySetDefinitionsScopedTenant)</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -6068,9 +6074,9 @@ extensions: [{ name: 'sort' }]
 
         if (($arraycustompolicySetSetsOrphanedFinalIncludingResourceGroups | measure-object).count -gt 0) {
             $tfCount = ($arraycustompolicySetSetsOrphanedFinalIncludingResourceGroups | measure-object).count
-            $tableId = "SummaryTable_customPolicySetsOrphaned"
+            $tableId = "TenantSummary_customPolicySetsOrphaned"
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_custompolicySetsOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($arraycustompolicySetSetsOrphanedFinalIncludingResourceGroups | measure-object).count) Orphaned Custom PolicySets ($scopeNamingSummary)</span> <abbr title="PolicySet has no Assignments (including ResourceGroups)"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_custompolicySetsOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($arraycustompolicySetSetsOrphanedFinalIncludingResourceGroups | measure-object).count) Orphaned Custom PolicySets ($scopeNamingSummary)</span> <abbr title="PolicySet has no Assignments (including ResourceGroups)"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -6181,9 +6187,9 @@ extensions: [{ name: 'sort' }]
 
         if (($arraycustompolicySetsOrphanedFinalIncludingResourceGroups | measure-object).count -gt 0) {
             $tfCount = ($arraycustompolicySetsOrphanedFinalIncludingResourceGroups | measure-object).count
-            $tableId = "SummaryTable_customPolicySetsOrphaned"
+            $tableId = "TenantSummary_customPolicySetsOrphaned"
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_custompolicySetsOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($arraycustompolicySetsOrphanedFinalIncludingResourceGroups | measure-object).count) Orphaned Custom PolicySets ($scopeNamingSummary)</span> <abbr title="PolicySet has no Assignments (including ResourceGroups) &#13;Note: PolicySets from superior scopes are not evaluated"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_custompolicySetsOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($arraycustompolicySetsOrphanedFinalIncludingResourceGroups | measure-object).count) Orphaned Custom PolicySets ($scopeNamingSummary)</span> <abbr title="PolicySet has no Assignments (including ResourceGroups) &#13;Note: PolicySets from superior scopes are not evaluated"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -6284,9 +6290,9 @@ extensions: [{ name: 'sort' }]
 
     if (($policySetsDeprecated | measure-object).count -gt 0) {
         $tfCount = ($policySetsDeprecated | measure-object).count
-        $tableId = "SummaryTable_policySetsDeprecated"
+        $tableId = "TenantSummary_policySetsDeprecated"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_policySetsDeprecated"><i class="fa fa-exclamation-triangle yellow" aria-hidden="true"></i> <span class="valignMiddle">$(($policySetsDeprecated | measure-object).count) Custom PolicySets / deprecated Built-in Policy <abbr title="PolicyDisplayName startswith [Deprecated] &#13;OR &#13;Metadata property Deprecated=true"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
+<button type="button" class="collapsible" id="buttonTenantSummary_policySetsDeprecated"><i class="fa fa-exclamation-triangle yellow" aria-hidden="true"></i> <span class="valignMiddle">$(($policySetsDeprecated | measure-object).count) Custom PolicySets / deprecated Built-in Policy <abbr title="PolicyDisplayName startswith [Deprecated] &#13;OR &#13;Metadata property Deprecated=true"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
 </button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
@@ -6424,9 +6430,9 @@ extensions: [{ name: 'sort' }]
 
     if (($policyAssignmentsDeprecated | measure-object).count -gt 0) {
         $tfCount = ($policyAssignmentsDeprecated | measure-object).count
-        $tableId = "SummaryTable_policyAssignmnetsDeprecated"
+        $tableId = "TenantSummary_policyAssignmentsDeprecated"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_policyAssignmnetsDeprecated"><i class="fa fa-exclamation-triangle orange" aria-hidden="true"></i> <span class="valignMiddle">$(($policyAssignmentsDeprecated | measure-object).count) Policy Assignments / deprecated Built-in Policy <abbr title="PolicyDisplayName startswith [Deprecated] &#13;OR &#13;Metadata property Deprecated=true"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
+<button type="button" class="collapsible" id="buttonTenantSummary_policyAssignmentsDeprecated"><i class="fa fa-exclamation-triangle orange" aria-hidden="true"></i> <span class="valignMiddle">$(($policyAssignmentsDeprecated | measure-object).count) Policy Assignments / deprecated Built-in Policy <abbr title="PolicyDisplayName startswith [Deprecated] &#13;OR &#13;Metadata property Deprecated=true"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
 </button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
@@ -6532,12 +6538,12 @@ extensions: [{ name: 'sort' }]
 
     if ($policyExemptionsCount -gt 0) {
         $tfCount = $policyExemptionsCount
-        $tableId = "SummaryTable_policyExemptions"
+        $tableId = "TenantSummary_policyExemptions"
 
         $expiredExemptionsCount = ($htPolicyAssignmentExemptions.Keys | where-object { $htPolicyAssignmentExemptions.($_).exemption.properties.expiresOn -and $htPolicyAssignmentExemptions.($_).exemption.properties.expiresOn -lt (Get-Date).ToUniversalTime() } | Measure-Object).count
 
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_policyExemptions"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$($policyExemptionsCount) Policy Exemptions | Expired: $($expiredExemptionsCount)</span>
+<button type="button" class="collapsible" id="buttonTenantSummary_policyExemptions"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$($policyExemptionsCount) Policy Exemptions | Expired: $($expiredExemptionsCount)</span>
 </button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
@@ -6785,10 +6791,6 @@ extensions: [{ name: 'sort' }]
         }
 
         #exemptions
-        #
-        #$htPolicyAssignmentExemptions | fl
-        #
-        #write-host $policyAssignmentIdUnique
         $arrayExemptions = @()
         foreach ($exemptionId in $htPolicyAssignmentExemptions.keys){
             if ($htPolicyAssignmentExemptions.($exemptionId).exemption.properties.policyAssignmentId -eq $policyAssignmentIdUnique.PolicyAssignmentId){
@@ -6807,12 +6809,7 @@ extensions: [{ name: 'sort' }]
 
 
     }
-    <#sduhsduhs
-    $htPolicyAssignmentRelatedExemptions."/providers/Microsoft.Management/managementGroups/0/providers/Microsoft.Authorization/policyAssignments/ed5888f0ca2840a8af597f98".exemptionsCount
-    $htPolicyAssignmentRelatedExemptions."/providers/Microsoft.Management/managementGroups/0/providers/Microsoft.Authorization/policyAssignments/aa53183cda6f429d973d2553".exemptionsCount
-    $htPolicyAssignmentExemptions.($exemption.id).exemption.properties
-    $htPolicyAssignmentExemptions | fl
-    #>
+
     $endtest = get-date
     Write-Host "   processing duration: $((NEW-TIMESPAN -Start $starttest -End $endtest).TotalSeconds) seconds"
 
@@ -6993,18 +6990,16 @@ extensions: [{ name: 'sort' }]
             }
         }
     }
-    #uuhudeh
-    #($script:policyAssignmentsAllArray | where-object { $_.ExemptionScope -eq "true"} | select-object MgId, subscriptionId, PolicyAssignmentId, ExemptionsCount, ExemptionScope, ExemptionThatApplies)
-    #
+
     $endtest2 = get-date
     Write-Host "   processing duration: $((NEW-TIMESPAN -Start $starttest2 -End $endtest2).TotalSeconds) seconds"
 
     if (($script:policyAssignmentsAllArray | measure-object).count -gt 0) {
         $tfCount = ($script:policyAssignmentsAllArray | measure-object).count
         $policyAssignmentsUniqueCount = ($script:policyAssignmentsAllArray | Sort-Object -Property PolicyAssignmentId -Unique | measure-object).count
-        $tableId = "SummaryTable_policyAssignmentsAll"
+        $tableId = "TenantSummary_policyAssignmentsAll"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_policyAssignmentsAll"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($script:policyAssignmentsAllArray | measure-object).count) Policy Assignments ($policyAssignmentsUniqueCount unique)</span>
+<button onclick="loadtf$tableId()" type="button" class="collapsible" id="buttonTenantSummary_policyAssignmentsAll"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($script:policyAssignmentsAllArray | measure-object).count) Policy Assignments ($policyAssignmentsUniqueCount unique)</span>
 </button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a><br>
@@ -7052,6 +7047,22 @@ extensions: [{ name: 'sort' }]
         $htmlTenantSummary = $null
         $htmlSummaryPolicyAssignmentsAll = $null
         $startloop = get-date 
+
+        if ($CsvExport){
+            if ($AzureDevOpsWikiAsCode){
+                $csvFilename = "AzGovViz_$($ManagementGroupIdCaseSensitived)_$($tableId)"
+            }
+            else{
+                $csvFilename = "AzGovViz_$($fileTimestamp)_$($ManagementGroupIdCaseSensitived)_$($tableId)"
+            }
+            if ($CsvExportUseQuotesAsNeeded) {
+                $script:policyAssignmentsAllArray | Export-Csv -Path "$($outputPath)$($DirectorySeparatorChar)$($csvFilename).csv" -Delimiter "$csvDelimiter" -NoTypeInformation -UseQuotes AsNeeded
+            }
+            else {
+                $script:policyAssignmentsAllArray | Export-Csv -Path "$($outputPath)$($DirectorySeparatorChar)$($csvFilename).csv" -Delimiter "$csvDelimiter" -NoTypeInformation
+            }
+        }
+
         $htmlSummaryPolicyAssignmentsAll = foreach ($policyAssignment in $script:policyAssignmentsAllArray | sort-object -Property Level, MgName, MgId, SubscriptionName, SubscriptionId) {
             @"
 <tr>
@@ -7104,8 +7115,10 @@ extensions: [{ name: 'sort' }]
         </table>
     </div>
     <script>
+        function loadtf$tableId() { if (window.helpertfConfig4$tableId !== 1) { 
+        window.helpertfConfig4$tableId =1;
         var tfConfig4$tableId = {
-            base_path: 'https://www.azadvertizer.net/azgovvizv4/tablefilter/', rows_counter: true,
+        base_path: 'https://www.azadvertizer.net/azgovvizv4/tablefilter/', rows_counter: true,
 "@
         if ($tfCount -gt 10) {
             $spectrum = "10, $tfCount"
@@ -7128,11 +7141,17 @@ extensions: [{ name: 'sort' }]
                 $spectrum = "10, 30, 50, 100, 250, 500, 750, 1000, 1500, 3000, $tfCount"
             }
             $htmlTenantSummary += @"
-paging: {results_per_page: ['Records: ', [$spectrum]]},state: {types: ['local_storage'], filters: true, page_number: true, page_length: true, sort: true},
+        paging: {results_per_page: ['Records: ', [$spectrum]]},state: {types: ['local_storage'], filters: true, page_number: true, page_length: true, sort: true},
 "@ 
         }
         $htmlTenantSummary += @"
-btn_reset: true, highlight_keywords: true, alternate_rows: true, auto_filter: { delay: 1100 }, no_results_message: true,
+            btn_reset: true, 
+            highlight_keywords: true, 
+            alternate_rows: true, 
+            auto_filter: { 
+                delay: 1100 
+            }, 
+            no_results_message: true,
             col_0: 'select',
             col_6: 'select',
             col_7: 'select',
@@ -7159,10 +7178,10 @@ btn_reset: true, highlight_keywords: true, alternate_rows: true, auto_filter: { 
 
         if (-not $NoPolicyComplianceStates) {
             $htmlTenantSummary += @"
-'number',
-'number',
-'number',
-'number',
+                'number',
+                'number',
+                'number',
+                'number',
 "@
         }
 
@@ -7186,30 +7205,32 @@ btn_reset: true, highlight_keywords: true, alternate_rows: true, auto_filter: { 
         }
 
         $htmlTenantSummary += @"
-extensions: [
-    {
-        name: 'colsVisibility',
+            extensions: [
+                {
+                    name: 'colsVisibility',
 "@
 
         if (-not $NoPolicyComplianceStates) {
             $htmlTenantSummary += @"
-        at_start: [9, 21],
+                    at_start: [9, 21],
 "@
         }
         else {
             $htmlTenantSummary += @"
-            at_start: [9, 17],
+                    at_start: [9, 17],
 "@        
         }
 
         $htmlTenantSummary += @"
-        text: 'Columns: ',
-        enable_tick_all: true
-    },    
-    { name: 'sort' }]
+                    text: 'Columns: ',
+                    enable_tick_all: true
+                },    
+                { name: 'sort' 
+                }
+            ]
         };
         var tf = new TableFilter('$tableId', tfConfig4$tableId);
-        tf.init();
+        tf.init();}}
     </script>
 "@
     }
@@ -7249,9 +7270,9 @@ extensions: [
 
     if ($tenantCustomRolesCount -gt 0) {
         $tfCount = $tenantCustomRolesCount
-        $tableId = "SummaryTable_customRoles"
+        $tableId = "TenantSummary_customRoles"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_customRoles">$faimage <span class="valignMiddle">$tenantCustomRolesCount Custom Roles ($scopeNamingSummary) (Limit: $tenantCustomRolesCount/$LimitRBACCustomRoleDefinitionsTenant)</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_customRoles">$faimage <span class="valignMiddle">$tenantCustomRolesCount Custom Roles ($scopeNamingSummary) (Limit: $tenantCustomRolesCount/$LimitRBACCustomRoleDefinitionsTenant)</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -7371,9 +7392,9 @@ extensions: [{ name: 'sort' }]
 
         if (($arrayCustomRolesOrphanedFinalIncludingResourceGroups | measure-object).count -gt 0) {
             $tfCount = ($arrayCustomRolesOrphanedFinalIncludingResourceGroups | measure-object).count
-            $tableId = "SummaryTable_customRolesOrphaned"
+            $tableId = "TenantSummary_customRolesOrphaned"
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_customRolesOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($arrayCustomRolesOrphanedFinalIncludingResourceGroups | measure-object).count) Orphaned Custom Roles ($scopeNamingSummary) <abbr title="Role has no Assignments (including ResourceGroups and Resources)"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
+<button type="button" class="collapsible" id="buttonTenantSummary_customRolesOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($arrayCustomRolesOrphanedFinalIncludingResourceGroups | measure-object).count) Orphaned Custom Roles ($scopeNamingSummary) <abbr title="Role has no Assignments (including ResourceGroups and Resources)"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
 </button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
@@ -7503,9 +7524,9 @@ extensions: [{ name: 'sort' }]
 
         if (($arrayCustomRolesOrphanedFinalIncludingResourceGroups | measure-object).count -gt 0) {
             $tfCount = ($arrayCustomRolesOrphanedFinalIncludingResourceGroups | measure-object).count
-            $tableId = "SummaryTable_customRolesOrphaned"
+            $tableId = "TenantSummary_customRolesOrphaned"
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_customRolesOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($arrayCustomRolesOrphanedFinalIncludingResourceGroups | measure-object).count) Orphaned Custom Roles ($scopeNamingSummary) <abbr title="Role has no Assignments (including ResourceGroups and Resources) &#13;Roles where assignableScopes contins MG Id from superior scopes are not evaluated"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
+<button type="button" class="collapsible" id="buttonTenantSummary_customRolesOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($arrayCustomRolesOrphanedFinalIncludingResourceGroups | measure-object).count) Orphaned Custom Roles ($scopeNamingSummary) <abbr title="Role has no Assignments (including ResourceGroups and Resources) &#13;Roles where assignableScopes contins MG Id from superior scopes are not evaluated"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
 </button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
@@ -7591,9 +7612,9 @@ extensions: [{ name: 'sort' }]
 
     if (($roleAssignmentsOrphanedUnique | measure-object).count -gt 0) {
         $tfCount = ($roleAssignmentsOrphanedUnique | measure-object).count
-        $tableId = "SummaryTable_roleAssignmnetsOrphaned"
+        $tableId = "TenantSummary_roleAssignmnetsOrphaned"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_roleAssignmnetsOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($roleAssignmentsOrphanedUnique | measure-object).count) Orphaned Role Assignments ($scopeNamingSummary) <abbr title="Role definition was deleted although and assignment existed &#13;OR &#13;Target identity (User, Group, ServicePrincipal) was deleted"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
+<button type="button" class="collapsible" id="buttonTenantSummary_roleAssignmnetsOrphaned"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($roleAssignmentsOrphanedUnique | measure-object).count) Orphaned Role Assignments ($scopeNamingSummary) <abbr title="Role definition was deleted although and assignment existed &#13;OR &#13;Target identity (User, Group, ServicePrincipal) was deleted"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
 </button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
@@ -7717,6 +7738,13 @@ extensions: [{ name: 'sort' }]
             $htRoleAssignmentRelatedPolicyAssignments.($roleAssignmentIdUnique.RoleAssignmentId).roleType = $roleType
             $htRoleAssignmentRelatedPolicyAssignments.($roleAssignmentIdUnique.RoleAssignmentId).roleWithWithoutLinkToAzAdvertizer = $roleAssignmentIdUnique.RoleDefinitionName
         }
+
+        <#if ($roleAssignmentIdUnique.RoleAssignmentObjectType -eq "User"){
+            if (-not $htUserTypes.($roleAssignmentIdUnique.RoleAssignmentObjectId)){
+                $htUserTypes.($roleAssignmentIdUnique.RoleAssignmentObjectId) = @{ }
+                $htUserTypes.($roleAssignmentIdUnique.RoleAssignmentObjectId).userType = "Member"
+            }
+        }#>
     }
 
     Write-Host "  processing TenantSummary RoleAssignments (all $roleAssignmentsallCount)"
@@ -7760,9 +7788,52 @@ extensions: [{ name: 'sort' }]
             $mgOrSub = "Sub"
         }
 
+        $objectTypeUserType = ""
+        if (-not $NoAADGuestUsers){
+            if ($rbac.RoleAssignmentObjectType -eq "User"){
+                if ($htUserTypes.($rbac.RoleAssignmentObjectId)){
+                    #$objectTypeUserType = "($($htUserTypes.($rbac.RoleAssignmentObjectId).userType))"
+                    $objectTypeUserType = "(Guest)"
+                }
+                else{
+                    $objectTypeUserType = "(Member)"
+                }
+            }
+        }
+
         if (-not $NoAADGroupsResolveMembers) {
             if ($rbac.RoleAssignmentObjectType -eq "Group") {
                 if ($htAADGroupsDetails.($rbac.RoleAssignmentObjectId).MembersAllCount -gt 0) {
+
+                    [PSCustomObject]@{ 
+                        Level                         = $rbac.Level
+                        RoleAssignmentId              = $rbac.RoleAssignmentId
+                        MgId                          = $rbac.MgId
+                        MgName                        = $rbac.MgName
+                        SubscriptionId                = $rbac.SubscriptionId
+                        SubscriptionName              = $rbac.Subscription
+                        Scope                         = $scope
+                        Role                          = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).roleWithWithoutLinkToAzAdvertizer 
+                        RoleType                      = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).roleType
+                        AssignmentType                = "direct"
+                        AssignmentInheritFrom         = "n/a"
+                        ObjectDisplayName             = $rbac.RoleAssignmentDisplayname
+                        ObjectSignInName              = $rbac.RoleAssignmentSignInName
+                        ObjectId                      = $rbac.RoleAssignmentObjectId
+                        ObjectType                    = "$($rbac.RoleAssignmentObjectType) $objectTypeUserType"
+                        #ObjectTypeUserType            = $objectTypeUserType
+                        #GrpMemberDisplayName          = $grpMemberDisplayName
+                        #GrpMemberSignInName           = $grpMemberSignInName
+                        #GrpMemberId                   = $grpMemberId
+                        #GrpMemberType                 = $identityType
+                        #GrpMemberTypeUserType         = $grpMemberUserType
+                        MgOrSub                       = $mgOrSub
+                        RbacRelatedPolicyAssignment   = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).relatedPolicyAssignment
+                        RoleSecurityCustomRoleOwner   = $rbac.RoleSecurityCustomRoleOwner
+                        RoleSecurityOwnerAssignmentSP = $rbac.RoleSecurityOwnerAssignmentSP 
+                    }
+                    #
+
                     foreach ($groupmember in $htAADGroupsDetails.($rbac.RoleAssignmentObjectId).MembersAll) {
                         if ($groupmember.'@odata.type' -eq "#microsoft.graph.user") {
                             if ($DoNotShowRoleAssignmentsUserData) {
@@ -7775,19 +7846,30 @@ extensions: [{ name: 'sort' }]
                             }
                             $grpMemberId = $groupmember.id
                             $grpMemberType = "User"
+                            $grpMemberUserType = ""
+                            if (-not $NoAADGuestUsers){
+                                if ($htUserTypes.($grpMemberId)){
+                                    #$grpMemberUserType = "($($htUserTypes.($grpMemberId).userType))"
+                                    $grpMemberUserType = "(Guest)"
+                                }
+                                else{
+                                    $grpMemberUserType = "(Member)"
+                                }
+                            }
                         }
                         if ($groupmember.'@odata.type' -eq "#microsoft.graph.group") {
                             $grpMemberDisplayName = $groupmember.displayName
                             $grpMemberSignInName = "n/a"
                             $grpMemberId = $groupmember.id
                             $grpMemberType = "Group"
+                            $grpMemberUserType = ""
                         }
                         if ($groupmember.'@odata.type' -eq "#microsoft.graph.servicePrincipal") {
                             $grpMemberDisplayName = $groupmember.appDisplayName
                             $grpMemberSignInName = "n/a"
                             $grpMemberId = $groupmember.id
                             $grpMemberType = "ServicePrincipal"
-                            
+                            $grpMemberUserType = ""
                         }
 
                         if (-not $NoServicePrincipalResolve) {
@@ -7812,14 +7894,18 @@ extensions: [{ name: 'sort' }]
                             Scope                         = $scope
                             Role                          = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).roleWithWithoutLinkToAzAdvertizer 
                             RoleType                      = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).roleType
-                            ObjectDisplayName             = $rbac.RoleAssignmentDisplayname
-                            ObjectSignInName              = $rbac.RoleAssignmentSignInName
-                            ObjectId                      = $rbac.RoleAssignmentObjectId
-                            ObjectType                    = $rbac.RoleAssignmentObjectType
-                            GrpMemberDisplayName          = $grpMemberDisplayName
-                            GrpMemberSignInName           = $grpMemberSignInName
-                            GrpMemberId                   = $grpMemberId
-                            GrpMemberType                 = $identityType
+                            AssignmentType                = "indirect"
+                            AssignmentInheritFrom         = "$($rbac.RoleAssignmentDisplayname) ($($rbac.RoleAssignmentObjectId))"
+                            ObjectDisplayName             = $grpMemberDisplayName
+                            ObjectSignInName              = $grpMemberSignInName
+                            ObjectId                      = $grpMemberId
+                            ObjectType                    = "$identityType $grpMemberUserType"
+                            #ObjectTypeUserType            = $grpMemberUserType
+                            #GrpMemberDisplayName          = $grpMemberDisplayName
+                            #GrpMemberSignInName           = $grpMemberSignInName
+                            #GrpMemberId                   = $grpMemberId
+                            #GrpMemberType                 = $identityType
+                            #GrpMemberTypeUserType         = $grpMemberUserType
                             MgOrSub                       = $mgOrSub
                             RbacRelatedPolicyAssignment   = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).relatedPolicyAssignment
                             RoleSecurityCustomRoleOwner   = $rbac.RoleSecurityCustomRoleOwner
@@ -7851,14 +7937,18 @@ extensions: [{ name: 'sort' }]
                         Scope                         = $scope
                         Role                          = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).roleWithWithoutLinkToAzAdvertizer 
                         RoleType                      = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).roleType
+                        AssignmentType                = "direct"
+                        AssignmentInheritFrom         = "n/a"
                         ObjectDisplayName             = $rbac.RoleAssignmentDisplayname
                         ObjectSignInName              = $rbac.RoleAssignmentSignInName
                         ObjectId                      = $rbac.RoleAssignmentObjectId
-                        ObjectType                    = $identityType
-                        GrpMemberDisplayName          = ""
-                        GrpMemberSignInName           = ""
-                        GrpMemberId                   = ""
-                        GrpMemberType                 = ""
+                        ObjectType                    = "$identityType $objectTypeUserType"
+                        #ObjectTypeUserType            = $objectTypeUserType
+                        #GrpMemberDisplayName          = ""
+                        #GrpMemberSignInName           = ""
+                        #GrpMemberId                   = ""
+                        #GrpMemberType                 = ""
+                        #GrpMemberTypeUserType         = ""
                         MgOrSub                       = $mgOrSub
                         RbacRelatedPolicyAssignment   = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).relatedPolicyAssignment
                         RoleSecurityCustomRoleOwner   = $rbac.RoleSecurityCustomRoleOwner
@@ -7890,14 +7980,18 @@ extensions: [{ name: 'sort' }]
                     Scope                         = $scope
                     Role                          = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).roleWithWithoutLinkToAzAdvertizer 
                     RoleType                      = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).roleType
+                    AssignmentType                = "direct"
+                    AssignmentInheritFrom         = "n/a"
                     ObjectDisplayName             = $rbac.RoleAssignmentDisplayname
                     ObjectSignInName              = $rbac.RoleAssignmentSignInName
                     ObjectId                      = $rbac.RoleAssignmentObjectId
-                    ObjectType                    = $identityType
-                    GrpMemberDisplayName          = ""
-                    GrpMemberSignInName           = ""
-                    GrpMemberId                   = ""
-                    GrpMemberType                 = ""
+                    ObjectType                    = "$identityType $objectTypeUserType"
+                    #ObjectTypeUserType            = $objectTypeUserType
+                    #GrpMemberDisplayName          = ""
+                    #GrpMemberSignInName           = ""
+                    #GrpMemberId                   = ""
+                    #GrpMemberType                 = ""
+                    #GrpMemberTypeUserType         = ""
                     MgOrSub                       = $mgOrSub
                     RbacRelatedPolicyAssignment   = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).relatedPolicyAssignment
                     RoleSecurityCustomRoleOwner   = $rbac.RoleSecurityCustomRoleOwner
@@ -7929,10 +8023,13 @@ extensions: [{ name: 'sort' }]
                 Scope                         = $scope
                 Role                          = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).roleWithWithoutLinkToAzAdvertizer 
                 RoleType                      = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).roleType
+                AssignmentType                = "direct"
+                AssignmentInheritFrom         = "n/a"
                 ObjectDisplayName             = $rbac.RoleAssignmentDisplayname
                 ObjectSignInName              = $rbac.RoleAssignmentSignInName
                 ObjectId                      = $rbac.RoleAssignmentObjectId
-                ObjectType                    = $identityType
+                ObjectType                    = "$identityType $objectTypeUserType"
+                #ObjectTypeUserType            = $objectTypeUserType
                 MgOrSub                       = $mgOrSub
                 RbacRelatedPolicyAssignment   = $htRoleAssignmentRelatedPolicyAssignments.($rbac.RoleAssignmentId).relatedPolicyAssignment
                 RoleSecurityCustomRoleOwner   = $rbac.RoleSecurityCustomRoleOwner
@@ -7944,9 +8041,9 @@ extensions: [{ name: 'sort' }]
     if (($script:rbacAll | measure-object).count -gt 0) {
         $uniqueRoleAssignmentsCount = ($script:rbacAll | sort-object -Property RoleAssignmentId -Unique | Measure-Object).count
         $tfCount = ($script:rbacAll | measure-object).count
-        $tableId = "SummaryTable_roleAssignmentsAll"
+        $tableId = "TenantSummary_roleAssignmentsAll"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_roleAssignmentsAll"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($script:rbacAll | measure-object).count) Role Assignments ($uniqueRoleAssignmentsCount unique)</span>
+<button onclick="loadtf$tableId()" type="button" class="collapsible" id="buttonTenantSummary_roleAssignmentsAll"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$(($script:rbacAll | measure-object).count) Role Assignments ($uniqueRoleAssignmentsCount unique)</span>
 </button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a><br>
@@ -7966,16 +8063,19 @@ extensions: [{ name: 'sort' }]
 <th>Identity SignInName</th>
 <th>Identity ObjectId</th>
 <th>Identity Type</th>
+<th>Applicability</th>
+<th>Applies through membership <abbr title="Note: the identity might not be a direct member of the group it could also be member of a nested group"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></th>
 "@
 
-        if (-not $NoAADGroupsResolveMembers) {
+        <#if (-not $NoAADGroupsResolveMembers) {
             $htmlTenantSummary += @"
 <th>GroupMember DisplayName</th>
 <th>GroupMember SignInName</th>
 <th>GroupMember ObjectId</th>
 <th>GroupMember Type</th>
+<th>GroupMember UserType</th>
 "@
-        }
+        }#>
 
         $htmlTenantSummary += @"
 <th>Role AssignmentId</th>
@@ -7986,10 +8086,25 @@ extensions: [{ name: 'sort' }]
 "@
         $cnter = 0
         $roleAssignmentsAllCount = ($script:rbacAll | Measure-Object).count
-        $startWriteRoleAssignmentsAll = get-date
         $htmlSummaryRoleAssignmentsAll = ""
         $htmlTenantSummary | Add-Content -Path "$($outputPath)$($DirectorySeparatorChar)$($fileName).html" -Encoding utf8 -Force
         $htmlTenantSummary = ""
+
+        if ($CsvExport){
+            if ($AzureDevOpsWikiAsCode){
+                $csvFilename = "AzGovViz_$($ManagementGroupIdCaseSensitived)_$($tableId)"
+            }
+            else{
+                $csvFilename = "AzGovViz_$($fileTimestamp)_$($ManagementGroupIdCaseSensitived)_$($tableId)"
+            }
+            if ($CsvExportUseQuotesAsNeeded) {
+                $script:rbacAll | Export-Csv -Path "$($outputPath)$($DirectorySeparatorChar)$($csvFilename).csv" -Delimiter "$csvDelimiter" -NoTypeInformation -UseQuotes AsNeeded
+            }
+            else {
+                $script:rbacAll | Export-Csv -Path "$($outputPath)$($DirectorySeparatorChar)$($csvFilename).csv" -Delimiter "$csvDelimiter" -NoTypeInformation
+            }
+        }
+
         $htmlSummaryRoleAssignmentsAll = foreach ($roleAssignment in $script:rbacAll | sort-object -Property Level, MgName, MgId, SubscriptionName, SubscriptionId, Scope, ObjectDisplayName) {
             $cnter++
             @"
@@ -8006,16 +8121,19 @@ extensions: [{ name: 'sort' }]
 <td class="breakwordall">$($roleAssignment.ObjectSignInName)</td>
 <td class="breakwordall">$($roleAssignment.ObjectId)</td>
 <td>$($roleAssignment.ObjectType)</td>
+<td>$($roleAssignment.AssignmentType)</td>
+<td>$($roleAssignment.AssignmentInheritFrom)</td>
 "@
 
-            if (-not $NoAADGroupsResolveMembers) {
+            <#if (-not $NoAADGroupsResolveMembers) {
                 @"
 <td class="breakwordall">$($roleAssignment.GrpMemberDisplayName)</td>
 <td class="breakwordall">$($roleAssignment.GrpMemberSignInName)</td>
 <td class="breakwordall">$($roleAssignment.GrpMemberId)</td>
 <td>$($roleAssignment.GrpMemberType)</td>
+<td>$($roleAssignment.GrpMemberTypeUserType)</td>
 "@
-            }
+            }#>
 
             @"
 <td class="breakwordall">$($roleAssignment.RoleAssignmentId)</td>
@@ -8035,6 +8153,8 @@ extensions: [{ name: 'sort' }]
         </table>
     </div>
     <script>
+        function loadtf$tableId() { if (window.helpertfConfig4$tableId !== 1) { 
+        window.helpertfConfig4$tableId =1;
         var tfConfig4$tableId = {
             base_path: 'https://www.azadvertizer.net/azgovvizv4/tablefilter/', rows_counter: true,
 "@
@@ -8067,12 +8187,13 @@ btn_reset: true, highlight_keywords: true, alternate_rows: true, auto_filter: { 
             col_0: 'select',
             col_7: 'select',
             col_11: 'multiple',
+            col_12: 'select',
 "@
-        if (-not $NoAADGroupsResolveMembers) {
+        <#if (-not $NoAADGroupsResolveMembers) {
             $htmlTenantSummary += @"
-            col_15: 'multiple',
+            col_18: 'multiple',
 "@
-        }
+        }#>
         $htmlTenantSummary += @"
             col_types: [
                 'caseinsensitivestring',
@@ -8087,35 +8208,38 @@ btn_reset: true, highlight_keywords: true, alternate_rows: true, auto_filter: { 
                 'caseinsensitivestring',
                 'caseinsensitivestring',
                 'caseinsensitivestring',
+                'caseinsensitivestring',
+                'caseinsensitivestring',
 "@
-        if (-not $NoAADGroupsResolveMembers) {
+        <#if (-not $NoAADGroupsResolveMembers) {
             $htmlTenantSummary += @"
                 'caseinsensitivestring',
                 'caseinsensitivestring',
                 'caseinsensitivestring',
                 'caseinsensitivestring',
+                'caseinsensitivestring',
 "@
-        }
+        }#>
         $htmlTenantSummary += @"
                 'caseinsensitivestring',
                 'caseinsensitivestring'
             ],
 "@
-        if (-not $NoAADGroupsResolveMembers) {
+        <#if (-not $NoAADGroupsResolveMembers) {
             $htmlTenantSummary += @"
-                watermark: ['', '', '', 'try [nonempty]', '', '', 'try owner||reader', '', '', '', '', '', '', '', '', '', '', ''],
+                watermark: ['', '', '', 'try [nonempty]', '', '', 'try owner||reader', '', '', '','', '', '', '','', '', '', '', '', ''],
 "@
         }
-        else {
+        else {#>
             $htmlTenantSummary += @"
-                watermark: ['', '', '', 'try [nonempty]', '', '', 'try owner||reader', '', '', '', '', '', '', ''],
+                watermark: ['', '', '', 'try [nonempty]', '', '', 'try owner||reader', '', '', '', '', '', '', '', '', ''],
 "@    
-        }
+        <#}#>
         $htmlTenantSummary += @"
             extensions: [{ name: 'sort' }]
         };
         var tf = new TableFilter('$tableId', tfConfig4$tableId);
-        tf.init();
+        tf.init();}}
     </script>
 "@
     }
@@ -8134,9 +8258,9 @@ btn_reset: true, highlight_keywords: true, alternate_rows: true, auto_filter: { 
     $customRolesOwnerHtAll = $tenantCustomRoles | Where-Object { ($htCacheDefinitions).role.$_.Actions -eq '*' -and (($htCacheDefinitions).role.$_.NotActions).length -eq 0 }
     if (($customRolesOwnerHtAll | measure-object).count -gt 0) {
         $tfCount = ($customRolesOwnerHtAll | measure-object).count
-        $tableId = "SummaryTable_customroleCustomRoleOwner"
+        $tableId = "TenantSummary_customroleCustomRoleOwner"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_customroleCustomRoleOwner"><i class="fa fa-exclamation-triangle yellow" aria-hidden="true"></i> <span class="valignMiddle">$(($customRolesOwnerHtAll | measure-object).count) Custom Roles Owner permissions ($scopeNamingSummary) <abbr title="Custom 'Owner' Role definitions should not exist"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
+<button type="button" class="collapsible" id="buttonTenantSummary_customroleCustomRoleOwner"><i class="fa fa-exclamation-triangle yellow" aria-hidden="true"></i> <span class="valignMiddle">$(($customRolesOwnerHtAll | measure-object).count) Custom Roles Owner permissions ($scopeNamingSummary) <abbr title="Custom 'Owner' Role definitions should not exist"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
 </button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
@@ -8236,9 +8360,9 @@ extensions: [{ name: 'sort' }]
     $roleAssignmentsOwnerAssignmentSP = $roleAssignmentsOwnerAssignmentSPAll | sort-object -Property RoleAssignmentId -Unique
     if (($roleAssignmentsOwnerAssignmentSP | measure-object).count -gt 0) {
         $tfCount = ($roleAssignmentsOwnerAssignmentSP | measure-object).count
-        $tableId = "SummaryTable_roleAssignmentsOwnerAssignmentSP"
+        $tableId = "TenantSummary_roleAssignmentsOwnerAssignmentSP"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_roleAssignmentsOwnerAssignmentSP"><i class="fa fa-exclamation-triangle yellow" aria-hidden="true"></i> <span class="valignMiddle">$(($roleAssignmentsOwnerAssignmentSP | measure-object).count) Owner permission assignments to ServicePrincipal ($scopeNamingSummary) <abbr title="Owner permissions on Service Principals should be treated exceptional"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
+<button type="button" class="collapsible" id="buttonTenantSummary_roleAssignmentsOwnerAssignmentSP"><i class="fa fa-exclamation-triangle yellow" aria-hidden="true"></i> <span class="valignMiddle">$(($roleAssignmentsOwnerAssignmentSP | measure-object).count) Owner permission assignments to ServicePrincipal ($scopeNamingSummary) <abbr title="Owner permissions on Service Principals should be treated exceptional"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></span>
 </button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
@@ -8331,9 +8455,9 @@ extensions: [{ name: 'sort' }]
     $roleAssignmentsOwnerAssignmentNotGroup = $roleAssignmentsOwnerAssignmentNotGroupAll | sort-object -Property RoleAssignmentId -Unique
     if (($roleAssignmentsOwnerAssignmentNotGroup | measure-object).count -gt 0) {
         $tfCount = ($roleAssignmentsOwnerAssignmentNotGroup | measure-object).count
-        $tableId = "SummaryTable_roleAssignmentsOwnerAssignmentNotGroup"
+        $tableId = "TenantSummary_roleAssignmentsOwnerAssignmentNotGroup"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_roleAssignmentsOwnerAssignmentNotGroup"><i class="fa fa-exclamation-triangle yellow" aria-hidden="true"></i> <span class="valignMiddle">$(($roleAssignmentsOwnerAssignmentNotGroup | measure-object).count) Owner permission assignments to notGroup ($scopeNamingSummary)</span>
+<button type="button" class="collapsible" id="buttonTenantSummary_roleAssignmentsOwnerAssignmentNotGroup"><i class="fa fa-exclamation-triangle yellow" aria-hidden="true"></i> <span class="valignMiddle">$(($roleAssignmentsOwnerAssignmentNotGroup | measure-object).count) Owner permission assignments to notGroup ($scopeNamingSummary)</span>
 </button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
@@ -8438,9 +8562,9 @@ extensions: [{ name: 'sort' }]
     $roleAssignmentsUserAccessAdministratorAssignmentNotGroup = $roleAssignmentsUserAccessAdministratorAssignmentNotGroupAll | sort-object -Property RoleAssignmentId -Unique
     if (($roleAssignmentsUserAccessAdministratorAssignmentNotGroup | measure-object).count -gt 0) {
         $tfCount = ($roleAssignmentsUserAccessAdministratorAssignmentNotGroup | measure-object).count
-        $tableId = "SummaryTable_roleAssignmentsUserAccessAdministratorAssignmentNotGroup"
+        $tableId = "TenantSummary_roleAssignmentsUserAccessAdministratorAssignmentNotGroup"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_roleAssignmentsUserAccessAdministratorAssignmentNotGroup"><i class="fa fa-exclamation-triangle yellow" aria-hidden="true"></i> <span class="valignMiddle">$(($roleAssignmentsUserAccessAdministratorAssignmentNotGroup | measure-object).count) UserAccessAdministrator permission assignments to notGroup ($scopeNamingSummary)</span>
+<button type="button" class="collapsible" id="buttonTenantSummary_roleAssignmentsUserAccessAdministratorAssignmentNotGroup"><i class="fa fa-exclamation-triangle yellow" aria-hidden="true"></i> <span class="valignMiddle">$(($roleAssignmentsUserAccessAdministratorAssignmentNotGroup | measure-object).count) UserAccessAdministrator permission assignments to notGroup ($scopeNamingSummary)</span>
 </button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
@@ -8554,9 +8678,9 @@ extensions: [{ name: 'sort' }]
     $blueprintDefinitions = ($blueprintBaseQuery | Where-Object { "" -eq $_.BlueprintAssignmentId })
     $blueprintDefinitionsCount = ($blueprintDefinitions | measure-object).count
     if ($blueprintDefinitionsCount -gt 0) {
-        $tableId = "SUMMARY_BlueprintDefinitions"
+        $tableId = "TenantSummary_BlueprintDefinitions"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $blueprintDefinitionsCount Blueprints</p></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_BlueprintDefinitions"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $blueprintDefinitionsCount Blueprints</p></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -8642,9 +8766,9 @@ extensions: [{ name: 'sort' }]
     $blueprintAssignmentsCount = ($blueprintAssignments | measure-object).count
 
     if ($blueprintAssignmentsCount -gt 0) {
-        $tableId = "SUMMARY_BlueprintAssignments"
+        $tableId = "TenantSummary_BlueprintAssignments"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $blueprintAssignmentsCount Blueprint Assignments</p></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_BlueprintAssignments"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $blueprintAssignmentsCount Blueprint Assignments</p></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -8751,9 +8875,9 @@ extensions: [{ name: 'sort' }]
 
     if ($blueprintDefinitionsOrphanedCount -gt 0) {
 
-        $tableId = "SUMMARY_BlueprintsOrphaned"
+        $tableId = "TenantSummary_BlueprintsOrphaned"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $blueprintDefinitionsOrphanedCount Orphaned Blueprints</p></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_BlueprintsOrphaned"><p><i class="fa fa-check-circle blue" aria-hidden="true"></i> $blueprintDefinitionsOrphanedCount Orphaned Blueprints</p></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -8863,9 +8987,9 @@ extensions: [{ name: 'sort' }]
     $mgsApproachingLimitPolicyAssignments = (($policyBaseQueryManagementGroups | Where-Object { "" -eq $_.SubscriptionId -and $_.PolicyAndPolicySetAssigmentAtScopeCount -gt 0 -and (($_.PolicyAndPolicySetAssigmentAtScopeCount -gt ($_.PolicyAssigmentLimit * ($LimitCriticalPercentage / 100)))) }) | Select-Object MgId, MgName, PolicyAssigmentAtScopeCount, PolicySetAssigmentAtScopeCount, PolicyAndPolicySetAssigmentAtScopeCount, PolicyAssigmentLimit -Unique)
     if (($mgsApproachingLimitPolicyAssignments | measure-object).count -gt 0) {
         $tfCount = ($mgsApproachingLimitPolicyAssignments | measure-object).count
-        $tableId = "SummaryTable_MgsapproachingLimitsPolicyAssignments"
+        $tableId = "TenantSummary_MgsapproachingLimitsPolicyAssignments"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_MgsapproachingLimitsPolicyAssignments"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($mgsApproachingLimitPolicyAssignments | measure-object).count) Management Groups approaching Limit ($LimitPOLICYPolicyAssignmentsManagementGroup) for PolicyAssignment</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_MgsapproachingLimitsPolicyAssignments"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($mgsApproachingLimitPolicyAssignments | measure-object).count) Management Groups approaching Limit ($LimitPOLICYPolicyAssignmentsManagementGroup) for PolicyAssignment</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id= "$tableId" class="summaryTable">
@@ -8947,9 +9071,9 @@ extensions: [{ name: 'sort' }]
     $mgsApproachingLimitPolicyScope = (($policyBaseQueryManagementGroups | Where-Object { "" -eq $_.SubscriptionId -and $_.PolicyDefinitionsScopedCount -gt 0 -and (($_.PolicyDefinitionsScopedCount -gt ($_.PolicyDefinitionsScopedLimit * ($LimitCriticalPercentage / 100)))) }) | Select-Object MgId, MgName, PolicyDefinitionsScopedCount, PolicyDefinitionsScopedLimit -Unique)
     if (($mgsApproachingLimitPolicyScope | measure-object).count -gt 0) {
         $tfCount = ($mgsApproachingLimitPolicyScope | measure-object).count
-        $tableId = "SummaryTable_MgsapproachingLimitsPolicyScope"
+        $tableId = "TenantSummary_MgsapproachingLimitsPolicyScope"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_MgsapproachingLimitsPolicyScope"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($mgsApproachingLimitPolicyScope | measure-object).count) Management Groups approaching Limit ($LimitPOLICYPolicyDefinitionsScopedManagementGroup) for Policy Scope</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_MgsapproachingLimitsPolicyScope"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($mgsApproachingLimitPolicyScope | measure-object).count) Management Groups approaching Limit ($LimitPOLICYPolicyDefinitionsScopedManagementGroup) for Policy Scope</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -9031,9 +9155,9 @@ extensions: [{ name: 'sort' }]
     $mgsApproachingLimitPolicySetScope = (($policyBaseQueryManagementGroups | Where-Object { "" -eq $_.SubscriptionId -and $_.PolicySetDefinitionsScopedCount -gt 0 -and (($_.PolicySetDefinitionsScopedCount -gt ($_.PolicySetDefinitionsScopedLimit * ($LimitCriticalPercentage / 100)))) }) | Select-Object MgId, MgName, PolicySetDefinitionsScopedCount, PolicySetDefinitionsScopedLimit -Unique)
     if ($mgsApproachingLimitPolicySetScope.count -gt 0) {
         $tfCount = ($mgsApproachingLimitPolicySetScope | measure-object).count 
-        $tableId = "SummaryTable_MgsapproachingLimitsPolicySetScope"
+        $tableId = "TenantSummary_MgsapproachingLimitsPolicySetScope"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_MgsapproachingLimitsPolicySetScope"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($mgsApproachingLimitPolicySetScope | measure-object).count) Management Groups approaching Limit ($LimitPOLICYPolicySetDefinitionsScopedManagementGroup) for PolicySet Scope</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_MgsapproachingLimitsPolicySetScope"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($mgsApproachingLimitPolicySetScope | measure-object).count) Management Groups approaching Limit ($LimitPOLICYPolicySetDefinitionsScopedManagementGroup) for PolicySet Scope</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -9115,9 +9239,9 @@ extensions: [{ name: 'sort' }]
     $mgsApproachingRoleAssignmentLimit = $rbacBaseQuery | Where-Object { "" -eq $_.SubscriptionId -and $_.RoleAssignmentsCount -gt ($_.RoleAssignmentsLimit * $LimitCriticalPercentage / 100) } | Sort-Object -Property MgId -Unique | select-object -Property MgId, MgName, RoleAssignmentsCount, RoleAssignmentsLimit
     if (($mgsApproachingRoleAssignmentLimit | measure-object).count -gt 0) {
         $tfCount = ($mgsApproachingRoleAssignmentLimit | measure-object).count
-        $tableId = "SummaryTable_MgsapproachingLimitsRoleAssignment"
+        $tableId = "TenantSummary_MgsapproachingLimitsRoleAssignment"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_MgsapproachingLimitsRoleAssignment"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($mgsApproachingRoleAssignmentLimit | measure-object).count) Management Groups approaching Limit ($LimitRBACRoleAssignmentsManagementGroup) for RoleAssignment</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_MgsapproachingLimitsRoleAssignment"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($mgsApproachingRoleAssignmentLimit | measure-object).count) Management Groups approaching Limit ($LimitRBACRoleAssignmentsManagementGroup) for RoleAssignment</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id= "$tableId" class="summaryTable">
@@ -9210,9 +9334,9 @@ extensions: [{ name: 'sort' }]
     $summarySubscriptions = $optimizedTableForPathQueryMgAndSub | Sort-Object -Property Subscription
     if (($summarySubscriptions | measure-object).count -gt 0) {
         $tfCount = ($summarySubscriptions | measure-object).count
-        $tableId = "SummaryTable_subs"
+        $tableId = "TenantSummary_subs"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_Subs"><img class="imgSubTree" src="https://www.azadvertizer.net/azgovvizv4/icon/Icon-general-2-Subscriptions.svg"> <span class="valignMiddle">$(($summarySubscriptions | measure-object).count) Subscriptions (state: enabled)</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_Subs"><img class="imgSubTree" src="https://www.azadvertizer.net/azgovvizv4/icon/Icon-general-2-Subscriptions.svg"> <span class="valignMiddle">$(($summarySubscriptions | measure-object).count) Subscriptions (state: enabled)</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -9353,9 +9477,9 @@ extensions: [{ name: 'sort' }]
     $outOfScopeSubscriptionsCount = ($script:outOfScopeSubscriptions | Measure-Object).Count
     if ($outOfScopeSubscriptionsCount -gt 0) {
         $tfCount = $outOfScopeSubscriptionsCount
-        $tableId = "SummaryTable_outOfScopeSubscriptions"
+        $tableId = "TenantSummary_outOfScopeSubscriptions"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_outOfScopeSubscriptions"><img class="imgSubTree" src="https://www.azadvertizer.net/azgovvizv4/icon/Icon-general-2-Subscriptions_excluded_r.svg"> <span class="valignMiddle">$outOfScopeSubscriptionsCount Subscriptions out-of-scope</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_outOfScopeSubscriptions"><img class="imgSubTree" src="https://www.azadvertizer.net/azgovvizv4/icon/Icon-general-2-Subscriptions_excluded_r.svg"> <span class="valignMiddle">$outOfScopeSubscriptionsCount Subscriptions out-of-scope</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -9443,9 +9567,9 @@ extensions: [{ name: 'sort' }]
         $tagNamesUniqueCount = ($arrayTagList | Sort-Object -Property TagName -Unique | Measure-Object).Count
         $tagNamesUsedInScopes = ($arrayTagList | Where-Object { $_.Scope -ne "AllScopes" } | Sort-Object -Property Scope -Unique).scope -join "$($CsvDelimiterOpposite) "
         $tfCount = $tagsUsageCount
-        $tableId = "SummaryTable_tagsUsage"
+        $tableId = "TenantSummary_tagsUsage"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_tagsUsage"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">Tag Name Usage ($tagNamesUniqueCount unique Tag Names applied at $($tagNamesUsedInScopes))</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_tagsUsage"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">Tag Name Usage ($tagNamesUniqueCount unique Tag Names applied at $($tagNamesUsedInScopes))</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -9543,9 +9667,9 @@ extensions: [{ name: 'sort' }]
 
         if ($resourcesResourceTypeCount -gt 0) {
             $tfCount = ($resourcesAllSummarized | measure-object).count
-            $tableId = "SummaryTable_resources"
+            $tableId = "TenantSummary_resources"
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_resources"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$resourcesResourceTypeCount ResourceTypes ($resourcesTotal Resources) in $resourcesLocationCount Locations ($scopeNamingSummary)</span>
+<button type="button" class="collapsible" id="buttonTenantSummary_resources"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$resourcesResourceTypeCount ResourceTypes ($resourcesTotal Resources) in $resourcesLocationCount Locations ($scopeNamingSummary)</span>
 </button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
@@ -9639,9 +9763,9 @@ extensions: [{ name: 'sort' }]
     $resourceTypesDiagnosticsMetricsLogsTrueCount = ($resourceTypesDiagnosticsArray | Where-Object { $_.Metrics -eq $True -or $_.Logs -eq $True } | Measure-Object).count
     if ($resourceTypesDiagnosticsArraySortedCount -gt 0) {
         $tfCount = $resourceTypesDiagnosticsArraySortedCount
-        $tableId = "SummaryTable_ResourcesDiagnosticsCapable"
+        $tableId = "TenantSummary_ResourcesDiagnosticsCapable"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_ResourcesDiagnosticsCapable"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$resourceTypesDiagnosticsMetricsLogsTrueCount/$resourceTypesDiagnosticsArraySortedCount ResourceTypes Diagnostics capable ($resourceTypesDiagnosticsMetricsTrueCount Metrics, $resourceTypesDiagnosticsLogsTrueCount Logs)</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_ResourcesDiagnosticsCapable"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$resourceTypesDiagnosticsMetricsLogsTrueCount/$resourceTypesDiagnosticsArraySortedCount ResourceTypes Diagnostics capable ($resourceTypesDiagnosticsMetricsTrueCount Metrics, $resourceTypesDiagnosticsLogsTrueCount Logs)</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-lightbulb-o" aria-hidden="true" style="color:#FFB100;"></i> <b>Create Custom Policies for Azure ResourceTypes that support Diagnostics Logs and Metrics</b> <a class="externallink" href="https://github.com/JimGBritt/AzurePolicy/blob/master/AzureMonitor/Scripts/README.md#overview-of-create-azdiagpolicyps1" target="_blank">Create-AzDiagPolicy</a><br>
 &nbsp;&nbsp;<i class="fa fa-windows" aria-hidden="true" style="color:#00a2ed;"></i> <b>Supported categories for Azure Resource Logs</b> <a class="externallink" href="https://docs.microsoft.com/en-us/azure/azure-monitor/platform/resource-logs-categories" target="_blank">Microsoft Docs</a><br>
@@ -9990,9 +10114,9 @@ extensions: [{ name: 'sort' }]
                 if ($diagnosticsPolicyAnalysisCount -gt 0) {
                     $tfCount = $diagnosticsPolicyAnalysisCount
     
-                    $tableId = "SummaryTable_DiagnosticsLifecycle"
+                    $tableId = "TenantSummary_DiagnosticsLifecycle"
                     $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="Summary_DiagnosticsLifecycle"><i class="fa fa-check" aria-hidden="true" style="color: #67C409"></i> <span class="valignMiddle">ResourceDiagnostics for Logs - Policy Lifecycle recommendations</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_DiagnosticsLifecycle"><i class="fa fa-check" aria-hidden="true" style="color: #67C409"></i> <span class="valignMiddle">ResourceDiagnostics for Logs - Policy Lifecycle recommendations</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-lightbulb-o" aria-hidden="true" style="color:#FFB100;"></i> <b>Create Custom Policies for Azure ResourceTypes that support Diagnostics Logs and Metrics</b> <a class="externallink" href="https://github.com/JimGBritt/AzurePolicy/blob/master/AzureMonitor/Scripts/README.md#overview-of-create-azdiagpolicyps1" target="_blank">Create-AzDiagPolicy</a><br>
 &nbsp;&nbsp;<i class="fa fa-windows" aria-hidden="true" style="color:#00a2ed;"></i> <b>Supported categories for Azure Resource Logs</b> <a class="externallink" href="https://docs.microsoft.com/en-us/azure/azure-monitor/platform/resource-logs-categories" target="_blank">Microsoft Docs</a>
@@ -10215,9 +10339,9 @@ extensions: [{ name: 'sort' }]
             }
         }
         $tfCount = $uniqueNamespacesCount
-        $tableId = "SummaryTable_SubResourceProviders"
+        $tableId = "TenantSummary_SubResourceProviders"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_SubResourceProviders"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">Resource Providers Total: $uniqueNamespacesCount Registered/Registering: $providersRegisteredCount NotRegistered/Unregistering: $providersNotRegisteredUniqueCount</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_SubResourceProviders"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">Resource Providers Total: $uniqueNamespacesCount Registered/Registering: $providersRegisteredCount NotRegistered/Unregistering: $providersNotRegisteredUniqueCount</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -10308,9 +10432,9 @@ extensions: [{ name: 'sort' }]
         $resourceProvidersAllCount = ($htResourceProvidersAll.Keys | Measure-Object).count
         if ($resourceProvidersAllCount -gt 0) {
             $tfCount = ($arrayResourceProvidersAll | Measure-Object).Count
-            $tableId = "SummaryTable_SubResourceProvidersDetailed"
+            $tableId = "TenantSummary_SubResourceProvidersDetailed"
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_SubResourceProvidersDetailed"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">Resource Providers Detailed</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_SubResourceProvidersDetailed"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">Resource Providers Detailed</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -10416,7 +10540,7 @@ extensions: [{ name: 'sort' }]
     $startResourceLocks = get-date
     $resourceProvidersAllCount = ($htResourceProvidersAll.Keys | Measure-Object).count
     if (($script:htResourceLocks.keys | Measure-Object).Count -gt 0) {
-        $tableId = "SummaryTable_ResourceLocks"
+        $tableId = "TenantSummary_ResourceLocks"
         
         $subscriptionLocksCannotDeleteCount = ($script:htResourceLocks.Keys | Where-Object { $script:htResourceLocks.($_).SubscriptionLocksCannotDeleteCount -gt 0 } | Measure-Object).Count
         $subscriptionLocksReadOnlyCount = ($script:htResourceLocks.Keys | Where-Object { $script:htResourceLocks.($_).SubscriptionLocksReadOnlyCount -gt 0 } | Measure-Object).Count
@@ -10428,7 +10552,7 @@ extensions: [{ name: 'sort' }]
         $resourcesLocksReadOnlyCount = ($script:htResourceLocks.Keys | Where-Object { $script:htResourceLocks.($_).ResourcesLocksReadOnlyCount -gt 0 } | Measure-Object).Count
         
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_ResourceLocks"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">Resource Locks</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_ResourceLocks"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">Resource Locks</span></button>
 <div class="content">
 <table id="$tableId" class="summaryTable">
 <thead>
@@ -10506,9 +10630,9 @@ extensions: [{ name: 'sort' }]
     $subscriptionsApproachingLimitFromResourceGroupsAll = $resourceGroupsAll | Where-Object { $_.count_ -gt ($LimitResourceGroups * ($LimitCriticalPercentage / 100)) }
     if (($subscriptionsApproachingLimitFromResourceGroupsAll | measure-object).count -gt 0) {
         $tfCount = ($subscriptionsApproachingLimitFromResourceGroupsAll | measure-object).count
-        $tableId = "SummaryTable_SubsapproachingLimitsResourceGroups"
+        $tableId = "TenantSummary_SubsapproachingLimitsResourceGroups"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_SubsapproachingLimitsResourceGroups"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($subscriptionsApproachingLimitFromResourceGroupsAll | measure-object).count) Subscriptions approaching Limit ($LimitResourceGroups) for ResourceGroups</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_SubsapproachingLimitsResourceGroups"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($subscriptionsApproachingLimitFromResourceGroupsAll | measure-object).count) Subscriptions approaching Limit ($LimitResourceGroups) for ResourceGroups</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id= "$tableId" class="summaryTable">
@@ -10591,9 +10715,9 @@ extensions: [{ name: 'sort' }]
     $subscriptionsApproachingLimitTags = ($optimizedTableForPathQueryMgAndSub | Where-Object { (($_.SubscriptionTagsCount -gt ($_.SubscriptionTagsLimit * ($LimitCriticalPercentage / 100)))) })
     if (($subscriptionsApproachingLimitTags | measure-object).count -gt 0) {
         $tfCount = ($subscriptionsApproachingLimitTags | measure-object).count
-        $tableId = "SummaryTable_SubsapproachingLimitsSubscriptionTags"
+        $tableId = "TenantSummary_SubsapproachingLimitsSubscriptionTags"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_SubsapproachingLimitsSubscriptionTags"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($subscriptionsApproachingLimitTags | measure-object).count) Subscriptions approaching Limit ($LimitTagsSubscription) for Tags</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_SubsapproachingLimitsSubscriptionTags"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($subscriptionsApproachingLimitTags | measure-object).count) Subscriptions approaching Limit ($LimitTagsSubscription) for Tags</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -10675,9 +10799,9 @@ extensions: [{ name: 'sort' }]
     $subscriptionsApproachingLimitPolicyAssignments = (($policyBaseQuerySubscriptions | Where-Object { "" -ne $_.SubscriptionId -and $_.PolicyAndPolicySetAssigmentAtScopeCount -gt 0 -and (($_.PolicyAndPolicySetAssigmentAtScopeCount -gt ($_.PolicyAssigmentLimit * ($LimitCriticalPercentage / 100)))) }) | Select-Object MgId, Subscription, SubscriptionId, PolicyAssigmentAtScopeCount, PolicySetAssigmentAtScopeCount, PolicyAndPolicySetAssigmentAtScopeCount, PolicyAssigmentLimit -Unique)
     if ($subscriptionsApproachingLimitPolicyAssignments.count -gt 0) {
         $tfCount = ($subscriptionsApproachingLimitPolicyAssignments | measure-object).count
-        $tableId = "SummaryTable_SubsapproachingLimitsPolicyAssignments"
+        $tableId = "TenantSummary_SubsapproachingLimitsPolicyAssignments"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_SubsapproachingLimitsPolicyAssignments"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($subscriptionsApproachingLimitPolicyAssignments | measure-object).count) Subscriptions approaching Limit ($LimitPOLICYPolicyAssignmentsSubscription) for PolicyAssignment</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_SubsapproachingLimitsPolicyAssignments"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($subscriptionsApproachingLimitPolicyAssignments | measure-object).count) Subscriptions approaching Limit ($LimitPOLICYPolicyAssignmentsSubscription) for PolicyAssignment</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -10759,9 +10883,9 @@ extensions: [{ name: 'sort' }]
     $subscriptionsApproachingLimitPolicyScope = (($policyBaseQuerySubscriptions | Where-Object { "" -ne $_.SubscriptionId -and $_.PolicyDefinitionsScopedCount -gt 0 -and (($_.PolicyDefinitionsScopedCount -gt ($_.PolicyDefinitionsScopedLimit * ($LimitCriticalPercentage / 100)))) }) | Select-Object MgId, Subscription, SubscriptionId, PolicyDefinitionsScopedCount, PolicyDefinitionsScopedLimit -Unique)
     if (($subscriptionsApproachingLimitPolicyScope | measure-object).count -gt 0) {
         $tfCount = ($subscriptionsApproachingLimitPolicyScope | measure-object).count
-        $tableId = "SummaryTable_SubsapproachingLimitsPolicyScope"
+        $tableId = "TenantSummary_SubsapproachingLimitsPolicyScope"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_SubsapproachingLimitsPolicyScope"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($subscriptionsApproachingLimitPolicyScope | measure-object).count) Subscriptions approaching Limit ($LimitPOLICYPolicyDefinitionsScopedSubscription) for Policy Scope</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_SubsapproachingLimitsPolicyScope"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($subscriptionsApproachingLimitPolicyScope | measure-object).count) Subscriptions approaching Limit ($LimitPOLICYPolicyDefinitionsScopedSubscription) for Policy Scope</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -10843,9 +10967,9 @@ extensions: [{ name: 'sort' }]
     $subscriptionsApproachingLimitPolicySetScope = (($policyBaseQuerySubscriptions | Where-Object { "" -ne $_.SubscriptionId -and $_.PolicySetDefinitionsScopedCount -gt 0 -and (($_.PolicySetDefinitionsScopedCount -gt ($_.PolicySetDefinitionsScopedLimit * ($LimitCriticalPercentage / 100)))) }) | Select-Object MgId, Subscription, SubscriptionId, PolicySetDefinitionsScopedCount, PolicySetDefinitionsScopedLimit -Unique)
     if ($subscriptionsApproachingLimitPolicySetScope.count -gt 0) {
         $tfCount = ($subscriptionsApproachingLimitPolicySetScope | measure-object).count
-        $tableId = "SummaryTable_SubsapproachingLimitsPolicySetScope"
+        $tableId = "TenantSummary_SubsapproachingLimitsPolicySetScope"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_SubsapproachingLimitsPolicySetScope"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($subscriptionsApproachingLimitPolicyScope | measure-object).count) Subscriptions approaching Limit ($LimitPOLICYPolicySetDefinitionsScopedSubscription) for PolicySet Scope</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_SubsapproachingLimitsPolicySetScope"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($subscriptionsApproachingLimitPolicyScope | measure-object).count) Subscriptions approaching Limit ($LimitPOLICYPolicySetDefinitionsScopedSubscription) for PolicySet Scope</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -10927,9 +11051,9 @@ extensions: [{ name: 'sort' }]
     $subscriptionsApproachingRoleAssignmentLimit = $rbacBaseQuery | Where-Object { "" -ne $_.SubscriptionId -and $_.RoleAssignmentsCount -gt ($_.RoleAssignmentsLimit * $LimitCriticalPercentage / 100) } | Sort-Object -Property SubscriptionId -Unique | select-object -Property MgId, SubscriptionId, Subscription, RoleAssignmentsCount, RoleAssignmentsLimit
     if (($subscriptionsApproachingRoleAssignmentLimit | measure-object).count -gt 0) {
         $tfCount = ($subscriptionsApproachingRoleAssignmentLimit | measure-object).count
-        $tableId = "SummaryTable_SubsapproachingLimitsRoleAssignment"
+        $tableId = "TenantSummary_SubsapproachingLimitsRoleAssignment"
         $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="SUMMARY_SubsapproachingLimitsRoleAssignment"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($subscriptionsApproachingRoleAssignmentLimit | measure-object).count) Subscriptions approaching Limit ($LimitRBACRoleAssignmentsSubscription) for RoleAssignment</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_SubsapproachingLimitsRoleAssignment"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> <span class="valignMiddle">$(($subscriptionsApproachingRoleAssignmentLimit | measure-object).count) Subscriptions approaching Limit ($LimitRBACRoleAssignmentsSubscription) for RoleAssignment</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id= "$tableId" class="summaryTable">
@@ -11026,10 +11150,10 @@ extensions: [{ name: 'sort' }]
 
         if ($servicePrincipalsOfTypeManagedIdentityCount -gt 0) {        
             $tfCount = $servicePrincipalsOfTypeManagedIdentityCount
-            $tableId = "SummaryTable_AADSPManagedIdentities"
+            $tableId = "TenantSummary_AADSPManagedIdentities"
 
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_AADSPManagedIdentities"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$($servicePrincipalsOfTypeManagedIdentityCount) AAD ServicePrincipals type=ManagedIdentity</span> <abbr title="ServicePrincipals where a Role assignment exists &#13;(including ResourceGroups and Resources)"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_AADSPManagedIdentities"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$($servicePrincipalsOfTypeManagedIdentityCount) AAD ServicePrincipals type=ManagedIdentity</span> <abbr title="ServicePrincipals where a Role assignment exists &#13;(including ResourceGroups and Resources)"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -11138,7 +11262,7 @@ tf.init();
 
         if ($servicePrincipalsOfTypeApplicationCount -gt 0) {
             $tfCount = $servicePrincipalsOfTypeApplicationCount
-            $tableId = "SummaryTable_AADSPCredExpiry"
+            $tableId = "TenantSummary_AADSPCredExpiry"
 
             $servicePrincipalsOfTypeApplicationSecretsExpiring = $servicePrincipalsOfTypeApplication | Where-Object { $htServicePrincipalsDetails.($_).appPasswordCredentialsGracePeriodExpiryCount -gt 0 }
             $servicePrincipalsOfTypeApplicationSecretsExpiringCount = ($servicePrincipalsOfTypeApplicationSecretsExpiring | Measure-Object).Count
@@ -11151,7 +11275,7 @@ tf.init();
                 $warningOrNot = "<i class=`"fa fa-check-circle blue`" aria-hidden=`"true`"></i>"
             }
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_AADSPCredExpiry">$warningOrNot <span class="valignMiddle">$($servicePrincipalsOfTypeApplicationCount) AAD ServicePrincipals type=Application | $servicePrincipalsOfTypeApplicationSecretsExpiringCount Secrets expire < $($ServicePrincipalExpiryWarningDays)d | $servicePrincipalsOfTypeApplicationCertificatesExpiringCount Certificates expire < $($ServicePrincipalExpiryWarningDays)d</span> <abbr title="ServicePrincipals where a Role assignment exists &#13;(including ResourceGroups and Resources)"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_AADSPCredExpiry">$warningOrNot <span class="valignMiddle">$($servicePrincipalsOfTypeApplicationCount) AAD ServicePrincipals type=Application | $servicePrincipalsOfTypeApplicationSecretsExpiringCount Secrets expire < $($ServicePrincipalExpiryWarningDays)d | $servicePrincipalsOfTypeApplicationCertificatesExpiringCount Certificates expire < $($ServicePrincipalExpiryWarningDays)d</span> <abbr title="ServicePrincipals where a Role assignment exists &#13;(including ResourceGroups and Resources)"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -11313,10 +11437,10 @@ tf.init();
 
         if ($appsWithOtherOrgIdCount -gt 0) {     
             $tfCount = $appsWithOtherOrgIdCount
-            $tableId = "SummaryTable_AADSPExternal"
+            $tableId = "TenantSummary_AADSPExternal"
 
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_AADSPExternal"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$($appsWithOtherOrgIdCount) External (appOwnerOrganizationId) AAD ServicePrincipals type=Application</span> <abbr title="External (appOwnerOrganizationId != $($checkContext.Subscription.TenantId)) ServicePrincipals where a Role assignment exists &#13;(including ResourceGroups and Resources)"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_AADSPExternal"><i class="fa fa-check-circle blue" aria-hidden="true"></i> <span class="valignMiddle">$($appsWithOtherOrgIdCount) External (appOwnerOrganizationId) AAD ServicePrincipals type=Application</span> <abbr title="External (appOwnerOrganizationId != $($checkContext.Subscription.TenantId)) ServicePrincipals where a Role assignment exists &#13;(including ResourceGroups and Resources)"><i class="fa fa-question-circle" aria-hidden="true"></i></abbr></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -11446,9 +11570,9 @@ tf.init();
 
         if (($arrayConsumptionData | Measure-Object).Count -gt 0) {
             $tfCount = ($arrayConsumptionData | Measure-Object).Count
-            $tableId = "SummaryTable_Consumption"
+            $tableId = "TenantSummary_Consumption"
             $htmlTenantSummary += @"
-<button type="button" class="collapsible" id="summary_Consumption"><i class="fa fa-credit-card" aria-hidden="true" style="color: #0078df"></i> <span class="valignMiddle">Total cost $($arrayTotalCostSummary -join "$CsvDelimiterOpposite ") last $AzureConsumptionPeriod days ($azureConsumptionStartDate - $azureConsumptionEndDate)</span></button>
+<button type="button" class="collapsible" id="buttonTenantSummary_Consumption"><i class="fa fa-credit-card" aria-hidden="true" style="color: #0078df"></i> <span class="valignMiddle">Total cost $($arrayTotalCostSummary -join "$CsvDelimiterOpposite ") last $AzureConsumptionPeriod days ($azureConsumptionStartDate - $azureConsumptionEndDate)</span></button>
 <div class="content">
 &nbsp;&nbsp;<i class="fa fa-table" aria-hidden="true"></i> Download CSV <a class="externallink" href="#" onclick="download_table_as_csv_semicolon('$tableId');">semicolon</a> | <a class="externallink" href="#" onclick="download_table_as_csv_comma('$tableId');">comma</a>
 <table id="$tableId" class="summaryTable">
@@ -11971,6 +12095,9 @@ if (-not $HierarchyMapOnly) {
     $arrayTagList = [System.Collections.ArrayList]@()
     $htSubscriptionTagList = New-Object system.collections.hashtable
     $htPolicyAssignmentExemptions = @{ }
+    if (-not $NoAADGuestUsers){
+        $htUserTypes = @{ }
+    }
       
 
     #current context sub not AAD*
@@ -12312,6 +12439,29 @@ $optimizedTableForPathQueryMg = ($optimizedTableForPathQuery | Select-Object -Pr
 $optimizedTableForPathQuerySub = ($optimizedTableForPathQuery | Where-Object { "" -ne $_.SubscriptionId } | Select-Object -Property subscription*) | sort-object -Property subscriptionId -Unique
 
 if (-not $HierarchyMapOnly) {
+    #AADGuests
+    if (-not $NoAADGuestUsers) {
+        Write-Host "Getting AAD Guest Users"
+        $startAADGuestUsers = get-date
+
+        $currenttask ="Get AAD Guest Users"
+        $uri = "https://graph.microsoft.com/v1.0/users?`$filter=userType eq 'Guest'"
+        $method = "GET"
+        $aadGuestUsers = AzAPICall -uri $uri -method $method -currentTask $currenttask -getGuests $true
+
+        $aadGuestUsersCount = ($aadGuestUsers | Measure-Object).Count
+        Write-Host " Found $aadGuestUsersCount AAD Guest Users"
+        if ($aadGuestUsersCount -gt 0){
+            foreach ($aadGuestUser in $aadGuestUsers){
+                $htUserTypes.($aadGuestUser.id) = @{ }
+                $htUserTypes.($aadGuestUser.id).userType = "Guest"
+            }
+        }
+
+        $endAADGuestUsers = Get-Date
+        Write-Host "Getting AAD Guest Users duration: $((NEW-TIMESPAN -Start $startAADGuestUsers -End $endAADGuestUsers).TotalMinutes) minutes ($((NEW-TIMESPAN -Start $startAADGuestUsers -End $endAADGuestUsers).TotalSeconds) seconds)"
+    }
+
     #AADGroups
     if (-not $NoAADGroupsResolveMembers) {
         $htAADGroupsDetails = @{ }
@@ -12330,6 +12480,14 @@ if (-not $HierarchyMapOnly) {
 
                 $aadGroupMembersAll = ($aadGroupMembers)
                 $aadGroupMembersUsers = ($aadGroupMembers | Where-Object { $_.'@odata.type' -eq "#microsoft.graph.user" })
+                <#
+                foreach ($aadGroupMembersUser in $aadGroupMembersUsers){
+                    if (-not $htUserTypes.($aadGroupMembersUser.id)){
+                        $htUserTypes.($aadGroupMembersUser.id) = @{ }
+                        $htUserTypes.($aadGroupMembersUser.id).userType = "Member"
+                    }
+                }
+                #>
                 $aadGroupMembersGroups = ($aadGroupMembers | Where-Object { $_.'@odata.type' -eq "#microsoft.graph.group" })
                 $aadGroupMembersServicePrincipals = ($aadGroupMembers | Where-Object { $_.'@odata.type' -eq "#microsoft.graph.servicePrincipal" })
 
